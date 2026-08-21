@@ -81,7 +81,7 @@ function ContentGeneratorContent() {
     isConfigured,
     language,
     audienceMode,
-    compressImagesForAi,
+    compressImagesForAi: isCompressionEnabled,
     setCompressImagesForAi,
     targetImageKb,
     setTargetImageKb,
@@ -377,7 +377,7 @@ function ContentGeneratorContent() {
 
       // 2. Prepare images for AI API: compress down to ~50KB if token optimization is enabled
       let imagesForAi = rawImages;
-      if (compressImagesForAi && rawImages.length > 0) {
+      if (isCompressionEnabled && rawImages.length > 0) {
         imagesForAi = await compressImagesForAi(rawImages, targetImageKb || 50);
       }
 
@@ -417,7 +417,7 @@ function ContentGeneratorContent() {
       if (!currentCaseId) setCurrentCaseId(savedId);
       toast({
         title: 'Answer Generated',
-        description: `Clinical question analyzed successfully${compressImagesForAi ? ' (Optimized ~50KB per image)' : ''}.`,
+        description: `Clinical question analyzed successfully${isCompressionEnabled ? ' (Optimized ~50KB per image)' : ''}.`,
       });
     } catch (error: any) {
       console.error('Question submission failed:', error);
@@ -901,7 +901,7 @@ function ContentGeneratorContent() {
                     {imageFiles.length > 0 && (
                       <div className="pt-1.5">
                         <ImageCompressionOption
-                          enabled={compressImagesForAi}
+                          enabled={isCompressionEnabled}
                           onToggle={setCompressImagesForAi}
                           targetKb={targetImageKb || 50}
                           onTargetKbChange={setTargetImageKb}

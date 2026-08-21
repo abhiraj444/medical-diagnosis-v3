@@ -287,14 +287,11 @@ export default function SettingsPage() {
     const startTime = Date.now();
 
     try {
-      // 0.1s standard PCM WAV header base64 payload to verify endpoint and API key validity
-      const dummyWavBase64 = 'UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
       const res = await fetch('/api/ai/transcribe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          audioData: dummyWavBase64,
-          mimeType: 'audio/wav',
+          isTest: true,
           sttConfig: {
             provider: localSttProvider,
             apiKey: localSttApiKey.trim(),
@@ -310,16 +307,16 @@ export default function SettingsPage() {
       const data = await res.json();
       const latencyMs = Date.now() - startTime;
 
-      if (res.ok) {
+      if (res.ok && (data.success || data.ok)) {
         setSttTestResult({
           success: true,
-          message: `STT Whisper endpoint is active and authenticated (${latencyMs}ms). Provider: ${data.provider || localSttProvider}.`,
+          message: data.message || `STT Whisper endpoint is active and authenticated (${latencyMs}ms). Provider: ${data.provider || localSttProvider}.`,
           modelUsed: data.model || localSttModel || DEFAULT_STT_MODEL,
           latencyMs,
         });
         toast({
           title: 'STT Whisper Verified',
-          description: `Speech-to-Text responded in ${latencyMs}ms (${localSttProvider}).`,
+          description: `Speech-to-Text connection verified in ${latencyMs}ms (${localSttProvider}).`,
         });
       } else {
         throw new Error(data.error || 'Failed to verify speech-to-text endpoint.');

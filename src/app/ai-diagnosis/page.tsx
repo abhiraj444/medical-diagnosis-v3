@@ -96,7 +96,7 @@ function AiDiagnosisContent() {
     isConfigured,
     language,
     audienceMode,
-    compressImagesForAi,
+    compressImagesForAi: isCompressionEnabled,
     setCompressImagesForAi,
     targetImageKb,
     setTargetImageKb,
@@ -340,7 +340,7 @@ function AiDiagnosisContent() {
 
       // 2. Prepare images for AI API: compress down to ~50KB if token optimization is enabled
       let imagesForAi = rawImages;
-      if (compressImagesForAi && rawImages.length > 0) {
+      if (isCompressionEnabled && rawImages.length > 0) {
         imagesForAi = await compressImagesForAi(rawImages, targetImageKb || 50);
       }
 
@@ -386,7 +386,7 @@ function AiDiagnosisContent() {
       toast({
         title: 'Report Analyzed',
         description: `Extracted ${reportData.totalParametersCount || 0} parameters with What-If explanations${
-          compressImagesForAi ? ' (Optimized ~50KB per page)' : ''
+          isCompressionEnabled ? ' (Optimized ~50KB per page)' : ''
         }.`,
       });
     } catch (error: any) {
@@ -426,7 +426,7 @@ function AiDiagnosisContent() {
 
       // 2. Prepare images for AI API: compress down to ~50KB if token optimization is enabled
       let imagesForAi = rawImages;
-      if (compressImagesForAi && rawImages.length > 0) {
+      if (isCompressionEnabled && rawImages.length > 0) {
         imagesForAi = await compressImagesForAi(rawImages, targetImageKb || 50);
       }
 
@@ -476,7 +476,7 @@ function AiDiagnosisContent() {
       if (!currentCaseId) setCurrentCaseId(savedId);
       toast({
         title: 'Diagnosis Generated',
-        description: `Clinical case analysis complete${compressImagesForAi ? ' (Optimized ~50KB per page)' : ''}.`,
+        description: `Clinical case analysis complete${isCompressionEnabled ? ' (Optimized ~50KB per page)' : ''}.`,
       });
     } catch (error: any) {
       console.error('Diagnosis failed:', error);
@@ -846,7 +846,7 @@ function AiDiagnosisContent() {
                   {files.length > 0 && (
                     <div className="pt-1.5">
                       <ImageCompressionOption
-                        enabled={compressImagesForAi}
+                        enabled={isCompressionEnabled}
                         onToggle={setCompressImagesForAi}
                         targetKb={targetImageKb || 50}
                         onTargetKbChange={setTargetImageKb}

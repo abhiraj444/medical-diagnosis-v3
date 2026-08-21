@@ -7,7 +7,144 @@ export const maxDuration = 60;
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { audioData, mimeType = 'audio/webm', sttConfig, config = {} } = body;
+    const { audioData, mimeType = 'audio/webm', sttConfig, config = {}, isTest = false } = body;
+
+    // Resolve active STT configuration
+    const activeSttConfig = sttConfig || config.sttConfig || {};
+    const provider = activeSttConfig.provider || (process.env.GROQ_API_KEY ? 'groq' : 'gemini');
+    const sttKey = (activeSttConfig.apiKey || '').trim() || (provider === 'groq' ? process.env.GROQ_API_KEY : provider === 'openai' ? process.env.OPENAI_API_KEY : '') || (provider === 'gemini' ? (config.geminiApiKey || process.env.GEMINI_API_KEY) : '');
+    const customEndpoint = (activeSttConfig.endpoint || '').trim();
+    const sttModel = activeSttConfig.model || (provider === 'openai' ? 'whisper-1' : 'whisper-large-v3-turbo');
+
+    // 0. Direct Connection & Authentication Test Mode
+    if (isTest) {
+      if (provider === 'groq') {
+        const key = sttKey || process.env.GROQ_API_KEY;
+        if (!key) {
+          return NextResponse.json(
+            { error: 'Groq API key is missing. Please enter your Groq API key (starts with gsk_).' },
+            { status: 400 }
+          );
+        }
+        try {
+          const testRes = await fetch('https://api.groq.com/openai/v1/models', {
+            method: 'GET',
+            headers: { Authorization: `Bearer ${key}` },
+          });
+          if (testRes.ok) {
+            return NextResponse.json({
+              success: true,
+              ok: true,
+              message: `Groq Whisper connection verified successfully. Ready to transcribe with ${sttModel}.`,
+              provider: 'groq',
+              model: sttModel,
+            });
+          } else {
+            const errData = await testRes.json().catch(() => null);
+            const errMsg = errData?.error?.message || `Groq authentication error (HTTP ${testRes.status})`;
+            return NextResponse.json({ error: errMsg }, { status: 400 });
+          }
+        } catch (fetchErr: any) {
+          return NextResponse.json(
+            { error: `Network error connecting to Groq API: ${fetchErr?.message || fetchErr}` },
+            { status: 500 }
+          );
+        }
+      }
+
+      if (provider === 'openai') {
+        const key = sttKey || process.env.OPENAI_API_KEY;
+        if (!key) {
+          return NextResponse.json(
+            { error: 'OpenAI API key is missing. Please enter your OpenAI API key (starts with sk-).' },
+            { status: 400 }
+          );
+        }
+        try {
+          const testRes = await fetch('https://api.openai.com/v1/models', {
+            method: 'GET',
+            headers: { Authorization: `Bearer ${key}` },
+          });
+          if (testRes.ok) {
+            return NextResponse.json({
+              success: true,
+              ok: true,
+              message: `OpenAI Whisper connection verified successfully. Ready to transcribe with ${sttModel}.`,
+              provider: 'openai',
+              model: sttModel,
+            });
+          } else {
+            const errData = await testRes.json().catch(() => null);
+            const errMsg = errData?.error?.message || `OpenAI authentication error (HTTP ${testRes.status})`;
+            return NextResponse.json({ error: errMsg }, { status: 400 });
+          }
+        } catch (fetchErr: any) {
+          return NextResponse.json(
+            { error: `Network error connecting to OpenAI API: ${fetchErr?.message || fetchErr}` },
+            { status: 500 }
+          );
+        }
+      }
+
+      if (provider === 'custom') {
+        if (!customEndpoint) {
+          return NextResponse.json(
+            { error: 'Custom STT endpoint URL is missing. Please specify a base URL.' },
+            { status: 400 }
+          );
+        }
+        try {
+          const baseUrl = customEndpoint
+            .replace(/\/audio\/transcriptions$/, '')
+            .replace(/\/chat\/completions$/, '')
+            .replace(/\/+$/, '');
+          const headers: Record<string, string> = {};
+          if (sttKey) headers['Authorization'] = `Bearer ${sttKey}`;
+
+          const testRes = await fetch(`${baseUrl}/models`, {
+            method: 'GET',
+            headers,
+          });
+
+          if (testRes.ok || testRes.status === 404 || testRes.status === 405) {
+            // Some specialized Whisper standalone servers return 404/405 for /models but serve /audio/transcriptions
+            return NextResponse.json({
+              success: true,
+              ok: true,
+              message: `Custom STT endpoint reached successfully (${baseUrl}). Ready with ${sttModel}.`,
+              provider: 'custom',
+              model: sttModel,
+            });
+          } else {
+            const errData = await testRes.json().catch(() => null);
+            const errMsg = errData?.error?.message || `Custom STT endpoint responded with HTTP ${testRes.status}`;
+            return NextResponse.json({ error: errMsg }, { status: 400 });
+          }
+        } catch (fetchErr: any) {
+          return NextResponse.json(
+            { error: `Network error reaching custom STT endpoint: ${fetchErr?.message || fetchErr}` },
+            { status: 500 }
+          );
+        }
+      }
+
+      if (provider === 'gemini') {
+        const gemKey = config.geminiApiKey || config.apiKey || process.env.GEMINI_API_KEY || '';
+        if (!gemKey) {
+          return NextResponse.json(
+            { error: 'Gemini API key is missing. Please enter your Gemini API key.' },
+            { status: 400 }
+          );
+        }
+        return NextResponse.json({
+          success: true,
+          ok: true,
+          message: 'Gemini Audio transcription engine is configured and ready.',
+          provider: 'gemini',
+          model: 'gemini-2.5-flash',
+        });
+      }
+    }
 
     if (!audioData || typeof audioData !== 'string') {
       return NextResponse.json(
@@ -21,12 +158,7 @@ export async function POST(req: NextRequest) {
       ? audioData.split('base64,')[1]
       : audioData;
 
-    // Resolve active STT configuration
-    const activeSttConfig = sttConfig || config.sttConfig || {};
-    const provider = activeSttConfig.provider || (process.env.GROQ_API_KEY ? 'groq' : 'gemini');
-    const sttKey = activeSttConfig.apiKey || process.env.GROQ_API_KEY || (provider === 'gemini' ? (config.geminiApiKey || process.env.GEMINI_API_KEY) : '');
-    const customEndpoint = (activeSttConfig.endpoint || '').trim();
-    const sttModel = activeSttConfig.model || (provider === 'openai' ? 'whisper-1' : 'whisper-large-v3-turbo');
+    let lastError: string | null = null;
 
     // Helper: Convert base64 to Blob & FormData for Whisper endpoints
     const createWhisperFormData = (modelName: string) => {
@@ -74,7 +206,7 @@ export async function POST(req: NextRequest) {
 
         if (groqRes.ok) {
           const data = await groqRes.json();
-          if (data.text) {
+          if (typeof data.text === 'string') {
             return NextResponse.json({
               transcript: data.text.trim(),
               provider: 'groq-whisper',
@@ -82,9 +214,12 @@ export async function POST(req: NextRequest) {
             });
           }
         } else {
-          console.warn('Groq STT returned non-200:', groqRes.status, await groqRes.text());
+          const errData = await groqRes.json().catch(() => null);
+          lastError = errData?.error?.message || `Groq returned HTTP ${groqRes.status}`;
+          console.warn('Groq STT returned non-200:', groqRes.status, lastError);
         }
-      } catch (groqErr) {
+      } catch (groqErr: any) {
+        lastError = groqErr?.message || String(groqErr);
         console.warn('Groq whisper transcription error, testing fallback:', groqErr);
       }
     }
@@ -107,7 +242,7 @@ export async function POST(req: NextRequest) {
 
         if (openaiRes.ok) {
           const data = await openaiRes.json();
-          if (data.text) {
+          if (typeof data.text === 'string') {
             return NextResponse.json({
               transcript: data.text.trim(),
               provider: 'openai-whisper',
@@ -115,9 +250,12 @@ export async function POST(req: NextRequest) {
             });
           }
         } else {
-          console.warn('OpenAI STT returned non-200:', openaiRes.status, await openaiRes.text());
+          const errData = await openaiRes.json().catch(() => null);
+          lastError = errData?.error?.message || `OpenAI returned HTTP ${openaiRes.status}`;
+          console.warn('OpenAI STT returned non-200:', openaiRes.status, lastError);
         }
-      } catch (openaiErr) {
+      } catch (openaiErr: any) {
+        lastError = openaiErr?.message || String(openaiErr);
         console.warn('OpenAI Whisper transcription error, testing fallback:', openaiErr);
       }
     }
@@ -147,7 +285,7 @@ export async function POST(req: NextRequest) {
 
         if (customRes.ok) {
           const data = await customRes.json();
-          if (data.text) {
+          if (typeof data.text === 'string') {
             return NextResponse.json({
               transcript: data.text.trim(),
               provider: 'custom-whisper',
@@ -155,9 +293,12 @@ export async function POST(req: NextRequest) {
             });
           }
         } else {
-          console.warn('Custom STT endpoint returned non-200:', customRes.status, await customRes.text());
+          const errData = await customRes.json().catch(() => null);
+          lastError = errData?.error?.message || `Custom STT returned HTTP ${customRes.status}`;
+          console.warn('Custom STT endpoint returned non-200:', customRes.status, lastError);
         }
-      } catch (customErr) {
+      } catch (customErr: any) {
+        lastError = customErr?.message || String(customErr);
         console.warn('Custom STT transcription error, testing fallback:', customErr);
       }
     }
@@ -176,7 +317,7 @@ export async function POST(req: NextRequest) {
 
         if (groqRes.ok) {
           const data = await groqRes.json();
-          if (data.text) {
+          if (typeof data.text === 'string') {
             return NextResponse.json({
               transcript: data.text.trim(),
               provider: 'groq-whisper (server fallback)',
@@ -219,6 +360,7 @@ export async function POST(req: NextRequest) {
           model: 'gemini-2.5-flash',
         });
       } catch (geminiErr: any) {
+        lastError = geminiErr?.message || String(geminiErr);
         console.error('Gemini audio transcription fallback failed:', geminiErr);
       }
     }
@@ -226,7 +368,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       {
         error:
-          'Speech-to-text transcription could not be completed. Please configure a Groq, OpenAI, Custom STT, or Gemini API key in Settings.',
+          lastError ||
+          'Speech-to-text transcription could not be completed. Please verify your Groq, OpenAI, Custom STT, or Gemini API key in Settings.',
       },
       { status: 400 }
     );
