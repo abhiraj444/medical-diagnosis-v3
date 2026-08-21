@@ -113,6 +113,10 @@ export default function SettingsPage() {
     setCustomApiKey,
     customModel,
     setCustomModel,
+    compressImagesForAi,
+    setCompressImagesForAi,
+    targetImageKb,
+    setTargetImageKb,
   } = useSettings();
 
   // Local form state
@@ -123,6 +127,9 @@ export default function SettingsPage() {
   const [localCustomEndpoint, setLocalCustomEndpoint] = useState(customEndpoint);
   const [localCustomKey, setLocalCustomKey] = useState(customApiKey);
   const [localCustomModel, setLocalCustomModel] = useState(customModel || 'gpt-4o');
+
+  const [localCompressImages, setLocalCompressImages] = useState<boolean>(compressImagesForAi);
+  const [localTargetKb, setLocalTargetKb] = useState<number>(targetImageKb || 50);
 
   const [showGeminiKey, setShowGeminiKey] = useState(false);
   const [showCustomKey, setShowCustomKey] = useState(false);
@@ -195,11 +202,14 @@ export default function SettingsPage() {
     setCustomApiKey(localCustomKey.trim());
     setCustomModel(localCustomModel.trim() || 'gpt-4o');
 
+    setCompressImagesForAi(localCompressImages);
+    setTargetImageKb(localTargetKb);
+
     toast({
       title: 'Settings Saved',
       description: `Active AI Provider: ${provider === 'gemini' ? 'Google Gemini' : 'Custom LLM'} (${
         provider === 'gemini' ? localGeminiModel || DEFAULT_GEMINI_MODEL : localCustomModel
-      })`,
+      }) • Image Compression: ${localCompressImages ? `~${localTargetKb}KB (Token Saver)` : 'Off (Original)'}`,
     });
     router.back();
   };
@@ -210,10 +220,12 @@ export default function SettingsPage() {
     setLocalCustomEndpoint('');
     setLocalCustomKey('');
     setLocalCustomModel('gpt-4o');
+    setLocalCompressImages(true);
+    setLocalTargetKb(50);
     setTestResult(null);
     toast({
       title: 'Reset to Defaults',
-      description: `Default Gemini model restored to ${DEFAULT_GEMINI_MODEL}.`,
+      description: `Default Gemini model restored to ${DEFAULT_GEMINI_MODEL} with ~50KB token compression enabled.`,
     });
   };
 
@@ -250,6 +262,82 @@ export default function SettingsPage() {
         </CardHeader>
         <CardContent className="p-5 sm:p-6 space-y-4">
           <ModeLanguageSelector />
+        </CardContent>
+      </Card>
+
+      {/* Document & Image Compression (Token Optimization) */}
+      <Card className="border border-border shadow-xs overflow-hidden rounded-2xl bg-card">
+        <div className="h-1 w-full bg-gradient-to-r from-emerald-500/50 via-teal-500/50 to-primary/50" />
+        <CardHeader className="bg-muted/20 border-b border-border/70 p-5">
+          <div className="flex items-center justify-between">
+            <div className="space-y-1">
+              <CardTitle className="text-base sm:text-lg font-bold flex items-center gap-2 text-foreground">
+                <Sparkles className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+                Document &amp; Image Token Optimization (~50KB)
+              </CardTitle>
+              <CardDescription className="text-xs text-muted-foreground">
+                Compress uploaded medical documents, PDFs, and photos before sending to AI models to save tokens and minimize latency.
+              </CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="p-5 sm:p-6 space-y-4">
+          <div className="flex items-center justify-between gap-4 p-3.5 rounded-xl border bg-muted/30 border-border/70">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <Label htmlFor="settings-compress-toggle" className="text-sm font-bold text-foreground cursor-pointer">
+                  Auto-Compress Uploaded Images to ~{localTargetKb}KB
+                </Label>
+                {localCompressImages && (
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-bold border border-emerald-500/30">
+                    Active Token Saver
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                When enabled, all uploaded images and PDF pages are converted and downscaled to ~{localTargetKb}KB only for the AI API prompt. The original full-fidelity images remain saved in your local history untouched.
+              </p>
+            </div>
+            <input
+              id="settings-compress-toggle"
+              type="checkbox"
+              checked={localCompressImages}
+              onChange={(e) => setLocalCompressImages(e.target.checked)}
+              className="h-5 w-5 rounded border-gray-300 text-emerald-600 focus:ring-emerald-500 cursor-pointer"
+            />
+          </div>
+
+          {localCompressImages && (
+            <div className="p-3.5 rounded-xl border border-emerald-500/20 bg-emerald-500/5 space-y-2">
+              <Label className="text-xs font-semibold text-foreground">
+                Target Image Size for AI Prompts
+              </Label>
+              <div className="flex flex-wrap gap-2">
+                {[
+                  { kb: 40, label: '40 KB (Maximum Token Saving)' },
+                  { kb: 50, label: '50 KB (Recommended / Balanced)' },
+                  { kb: 80, label: '80 KB (Higher Detail)' },
+                  { kb: 120, label: '120 KB (High Resolution)' },
+                ].map((item) => (
+                  <button
+                    key={item.kb}
+                    type="button"
+                    onClick={() => setLocalTargetKb(item.kb)}
+                    className={`text-xs px-3 py-1.5 rounded-lg border transition-all ${
+                      localTargetKb === item.kb
+                        ? 'bg-emerald-600 text-white font-bold border-emerald-600 shadow-xs'
+                        : 'bg-background hover:bg-muted text-foreground border-border'
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[11px] text-muted-foreground pt-1">
+                ✓ <strong>History Preservation</strong>: Your stored case files in Dexie always preserve the uncompressed, original resolution uploads for crisp offline review.
+              </p>
+            </div>
+          )}
         </CardContent>
       </Card>
 

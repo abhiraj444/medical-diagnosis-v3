@@ -194,23 +194,16 @@ export async function POST(req: NextRequest) {
               },
             });
           } else if (img.mimeType.startsWith('audio/')) {
-            if (isGroqEndpoint && key) {
-              // Groq: transcribe audio via dedicated Whisper endpoint first
-              const transcript = await transcribeAudioViaGroq(img.data, img.mimeType, key, endpoint);
-              if (transcript) {
-                augmentedPrompt = `[Audio Transcript from voice memo/dictation]:\n"${transcript}"\n\n${augmentedPrompt}`;
-              } else {
-                augmentedPrompt = `[Audio memo attached but transcription failed. Please analyze based on text input only.]\n\n${augmentedPrompt}`;
-              }
+            // Audio attachment: transcribe via Whisper or Groq if possible, and inject into prompt text
+            // Avoid sending raw 'input_audio' to providers that only support text/vision to prevent 400 Bad Request errors
+            let transcriptText: string | null = null;
+            if (key) {
+              transcriptText = await transcribeAudioViaGroq(img.data, img.mimeType, key, endpoint);
+            }
+            if (transcriptText) {
+              augmentedPrompt = `[Audio Transcript from clinical voice memo]:\n"${transcriptText}"\n\n${augmentedPrompt}`;
             } else {
-              // Other OpenAI-compatible providers: try input_audio format
-              contentParts.push({
-                type: 'input_audio',
-                input_audio: {
-                  data: img.data,
-                  format: img.mimeType.replace('audio/', ''),
-                },
-              });
+              augmentedPrompt = `[Spoken voice memo was recorded and attached as optional context. Please analyze based on the clinical text and visual findings.]\n\n${augmentedPrompt}`;
             }
           } else if (img.mimeType === 'application/pdf') {
             // PDFs: most custom providers don't support inline PDFs

@@ -1,12 +1,13 @@
 'use client';
 
 import { createContext, useContext, useState, useEffect, useMemo, type ReactNode } from 'react';
-import type { AiProvider, AiConfig } from '@/types';
+import type { AiProvider, AiConfig, SttProvider, SttConfig } from '@/types';
 
 export type TargetLanguage = 'english' | 'hinglish';
 export type AudienceMode = 'doctor' | 'simplified';
 
 export const DEFAULT_GEMINI_MODEL = 'gemini-3.7-flash';
+export const DEFAULT_STT_MODEL = 'whisper-large-v3-turbo';
 
 interface SettingsContextType {
     // AI Provider Configuration
@@ -29,6 +30,17 @@ interface SettingsContextType {
     customModel: string;
     setCustomModel: (model: string) => void;
 
+    // Speech-to-Text (STT) Settings
+    sttProvider: SttProvider;
+    setSttProvider: (provider: SttProvider) => void;
+    sttApiKey: string;
+    setSttApiKey: (key: string) => void;
+    sttEndpoint: string;
+    setSttEndpoint: (endpoint: string) => void;
+    sttModel: string;
+    setSttModel: (model: string) => void;
+    sttConfig: SttConfig;
+
     // Derived AI state
     activeModel: string;
     aiConfig: AiConfig;
@@ -40,6 +52,10 @@ interface SettingsContextType {
     setLanguage: (lang: TargetLanguage) => void;
     audienceMode: AudienceMode;
     setAudienceMode: (mode: AudienceMode) => void;
+    compressImagesForAi: boolean;
+    setCompressImagesForAi: (enabled: boolean) => void;
+    targetImageKb: number;
+    setTargetImageKb: (kb: number) => void;
 }
 
 const SettingsContext = createContext<SettingsContextType | undefined>(undefined);
@@ -54,8 +70,16 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     const [customApiKey, setCustomApiKeyInternal] = useState<string>('');
     const [customModel, setCustomModelInternal] = useState<string>('gpt-4o');
 
+    // STT State
+    const [sttProvider, setSttProviderInternal] = useState<SttProvider>('groq');
+    const [sttApiKey, setSttApiKeyInternal] = useState<string>('');
+    const [sttEndpoint, setSttEndpointInternal] = useState<string>('https://api.groq.com/openai/v1');
+    const [sttModel, setSttModelInternal] = useState<string>(DEFAULT_STT_MODEL);
+
     const [language, setLanguageInternal] = useState<TargetLanguage>('english');
     const [audienceMode, setAudienceModeInternal] = useState<AudienceMode>('doctor');
+    const [compressImagesForAi, setCompressImagesForAiInternal] = useState<boolean>(true);
+    const [targetImageKb, setTargetImageKbInternal] = useState<number>(50);
 
     useEffect(() => {
         // Check if server-side environment variable is configured
@@ -105,6 +129,24 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
             setCustomModelInternal(savedCustomModel);
         }
 
+        // Load STT Config
+        const savedSttProvider = localStorage.getItem('app_stt_provider') as SttProvider | null;
+        if (savedSttProvider && ['groq', 'openai', 'gemini', 'custom'].includes(savedSttProvider)) {
+            setSttProviderInternal(savedSttProvider);
+        }
+        const savedSttKey = localStorage.getItem('app_stt_api_key');
+        if (savedSttKey) {
+            setSttApiKeyInternal(savedSttKey);
+        }
+        const savedSttEndpoint = localStorage.getItem('app_stt_endpoint');
+        if (savedSttEndpoint) {
+            setSttEndpointInternal(savedSttEndpoint);
+        }
+        const savedSttModel = localStorage.getItem('app_stt_model');
+        if (savedSttModel) {
+            setSttModelInternal(savedSttModel);
+        }
+
         // Load Language & Audience
         const savedLang = localStorage.getItem('app_target_language') as TargetLanguage | null;
         if (savedLang === 'english' || savedLang === 'hinglish') {
@@ -114,6 +156,19 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         const savedMode = localStorage.getItem('app_audience_mode') as AudienceMode | null;
         if (savedMode === 'doctor' || savedMode === 'simplified') {
             setAudienceModeInternal(savedMode);
+        }
+
+        const savedCompress = localStorage.getItem('app_compress_images_for_ai');
+        if (savedCompress !== null) {
+            setCompressImagesForAiInternal(savedCompress === 'true');
+        }
+
+        const savedTargetKb = localStorage.getItem('app_target_image_kb');
+        if (savedTargetKb) {
+            const parsed = parseInt(savedTargetKb, 10);
+            if (!isNaN(parsed) && parsed >= 20 && parsed <= 300) {
+                setTargetImageKbInternal(parsed);
+            }
         }
     }, []);
 
@@ -153,6 +208,27 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         setCustomModelInternal(model);
     };
 
+    const setSttProvider = (provider: SttProvider) => {
+        localStorage.setItem('app_stt_provider', provider);
+        setSttProviderInternal(provider);
+    };
+
+    const setSttApiKey = (key: string) => {
+        localStorage.setItem('app_stt_api_key', key);
+        setSttApiKeyInternal(key);
+    };
+
+    const setSttEndpoint = (endpoint: string) => {
+        localStorage.setItem('app_stt_endpoint', endpoint);
+        setSttEndpointInternal(endpoint);
+    };
+
+    const setSttModel = (model: string) => {
+        const sanitized = model.trim() || DEFAULT_STT_MODEL;
+        localStorage.setItem('app_stt_model', sanitized);
+        setSttModelInternal(sanitized);
+    };
+
     const setLanguage = (lang: TargetLanguage) => {
         localStorage.setItem('app_target_language', lang);
         setLanguageInternal(lang);
@@ -161,6 +237,17 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     const setAudienceMode = (mode: AudienceMode) => {
         localStorage.setItem('app_audience_mode', mode);
         setAudienceModeInternal(mode);
+    };
+
+    const setCompressImagesForAi = (enabled: boolean) => {
+        localStorage.setItem('app_compress_images_for_ai', String(enabled));
+        setCompressImagesForAiInternal(enabled);
+    };
+
+    const setTargetImageKb = (kb: number) => {
+        const sanitized = Math.max(20, Math.min(300, kb));
+        localStorage.setItem('app_target_image_kb', String(sanitized));
+        setTargetImageKbInternal(sanitized);
     };
 
     // Derived values
@@ -174,6 +261,13 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
             ? geminiModel || DEFAULT_GEMINI_MODEL
             : customModel || 'Custom Model';
 
+    const sttConfig: SttConfig = useMemo(() => ({
+        provider: sttProvider,
+        apiKey: sttApiKey,
+        endpoint: sttEndpoint,
+        model: sttModel || DEFAULT_STT_MODEL,
+    }), [sttProvider, sttApiKey, sttEndpoint, sttModel]);
+
     const aiConfig: AiConfig = useMemo(() => ({
         provider: aiProvider,
         apiKey: geminiApiKey,
@@ -182,7 +276,8 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         customEndpoint,
         customApiKey,
         customModel,
-    }), [aiProvider, geminiApiKey, geminiModel, customEndpoint, customApiKey, customModel]);
+        sttConfig,
+    }), [aiProvider, geminiApiKey, geminiModel, customEndpoint, customApiKey, customModel, sttConfig]);
 
     return (
         <SettingsContext.Provider
@@ -201,6 +296,15 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
                 setCustomApiKey,
                 customModel,
                 setCustomModel,
+                sttProvider,
+                setSttProvider,
+                sttApiKey,
+                setSttApiKey,
+                sttEndpoint,
+                setSttEndpoint,
+                sttModel,
+                setSttModel,
+                sttConfig,
                 activeModel,
                 aiConfig,
                 isConfigured,
@@ -209,6 +313,10 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
                 setLanguage,
                 audienceMode,
                 setAudienceMode,
+                compressImagesForAi,
+                setCompressImagesForAi,
+                targetImageKb,
+                setTargetImageKb,
             }}
         >
             {children}

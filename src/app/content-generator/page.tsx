@@ -41,6 +41,8 @@ import { AudioPlayerCard } from '@/components/AudioPlayerCard';
 import { FollowUpChat } from '@/components/FollowUpChat';
 import type { RecordedAudio } from '@/hooks/useAudioRecorder';
 import { convertPdfToImages, isPdfFile } from '@/lib/pdf-to-images';
+import { compressImagesForAi } from '@/lib/image-compressor';
+import { ImageCompressionOption } from '@/components/ImageCompressionOption';
 import Link from 'next/link';
 
 function ContentGeneratorContent() {
@@ -73,7 +75,17 @@ function ContentGeneratorContent() {
 
   const { toast } = useToast();
   const { user, loading: authLoading } = useAuth();
-  const { apiKey, aiConfig, isConfigured, language, audienceMode } = useSettings();
+  const {
+    apiKey,
+    aiConfig,
+    isConfigured,
+    language,
+    audienceMode,
+    compressImagesForAi,
+    setCompressImagesForAi,
+    targetImageKb,
+    setTargetImageKb,
+  } = useSettings();
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -357,18 +369,26 @@ function ContentGeneratorContent() {
     setIsLoading(true);
     setErrorMessage(null);
     try {
+      // 1. Save original full-resolution files to local storage/history
       const imageUrls = await Promise.all(
         imageFiles.map((file) => LocalDataService.saveFile(file, user.id))
       );
-      const images = await Promise.all(imageFiles.map(fileToDataUri));
+      const rawImages = await Promise.all(imageFiles.map(fileToDataUri));
+
+      // 2. Prepare images for AI API: compress down to ~50KB if token optimization is enabled
+      let imagesForAi = rawImages;
+      if (compressImagesForAi && rawImages.length > 0) {
+        imagesForAi = await compressImagesForAi(rawImages, targetImageKb || 50);
+      }
 
       const [response, summaryResponse] = await Promise.all([
-        ClientSideAiService.answerClinicalQuestion(aiConfig, question.trim() || undefined, images, { language, audienceMode }),
-        ClientSideAiService.summarizeQuestion(aiConfig, question.trim() || undefined, images, { language, audienceMode }),
+        ClientSideAiService.answerClinicalQuestion(aiConfig, question.trim() || undefined, imagesForAi, { language, audienceMode }),
+        ClientSideAiService.summarizeQuestion(aiConfig, question.trim() || undefined, imagesForAi, { language, audienceMode }),
       ]);
 
       setResult(response);
       setProactiveQuestions(response.proactiveQuestions || []);
+      // Store original full-resolution files in the structured case history
       const newStructuredQuestion = { summary: summaryResponse.summary, images: imageUrls };
       setStructuredQuestion(newStructuredQuestion);
 
@@ -395,7 +415,10 @@ function ContentGeneratorContent() {
 
       const savedId = await LocalDataService.saveCase(caseData);
       if (!currentCaseId) setCurrentCaseId(savedId);
-      toast({ title: 'Answer Generated', description: 'Clinical question analyzed successfully.' });
+      toast({
+        title: 'Answer Generated',
+        description: `Clinical question analyzed successfully${compressImagesForAi ? ' (Optimized ~50KB per image)' : ''}.`,
+      });
     } catch (error: any) {
       console.error('Question submission failed:', error);
       const msg = error?.message || (typeof error === 'string' ? error : 'Failed to answer question.');
@@ -811,7 +834,12 @@ function ContentGeneratorContent() {
                   <div className="space-y-2.5">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <Label className="text-xs font-semibold">Attached Images, Audio Memos & Reports</Label>
-                      <AudioRecorder onAudioRecorded={handleAudioRecorded} />
+                      <AudioRecorder
+                        onAudioRecorded={handleAudioRecorded}
+                        onTranscribe={(text) =>
+                          setQuestion((prev) => (prev ? `${prev}\n\n[Dictation]: ${text}` : text))
+                        }
+                      />
                     </div>
 
                     {/* Audio Attachments List */}
@@ -827,8 +855,11 @@ function ContentGeneratorContent() {
                               duration={audioDurations[index]}
                               transcript={audioTranscripts[index]}
                               isTranscribing={transcribingAudioIndices.has(index)}
+                              onTranscriptGenerated={(t) => {
+                                setAudioTranscripts((prev) => ({ ...prev, [index]: t }));
+                              }}
                               onInsertTranscript={(t) =>
-                                setQuestion((prev) => (prev ? `${prev}\n\n"${t}"` : `"${t}"`))
+                                setQuestion((prev) => (prev ? `${prev}\n\n[Dictation]: ${t}` : t))
                               }
                               onRemove={() => handleRemoveImage(index)}
                             />
@@ -865,6 +896,19 @@ function ContentGeneratorContent() {
                         />
                       </label>
                     </div>
+
+                    {/* Image compression toggle for AI token optimization */}
+                    {imageFiles.length > 0 && (
+                      <div className="pt-1.5">
+                        <ImageCompressionOption
+                          enabled={compressImagesForAi}
+                          onToggle={setCompressImagesForAi}
+                          targetKb={targetImageKb || 50}
+                          onTargetKbChange={setTargetImageKb}
+                          attachedCount={imageFiles.filter((f) => !f.type.startsWith('audio/')).length}
+                        />
+                      </div>
+                    )}
                   </div>
 
                   <Button

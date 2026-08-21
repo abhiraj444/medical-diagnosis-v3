@@ -1,8 +1,9 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import type { DiagnosisItem, ClinicalAnswerData, Slide, FollowUpThread, AiConfig, ReportKnowledgeData } from '@/types';
+import type { DiagnosisItem, ClinicalAnswerData, Slide, FollowUpThread, AiConfig, SttConfig, ReportKnowledgeData } from '@/types';
 import type { TargetLanguage, AudienceMode } from '@/context/SettingsContext';
 
 export const DEFAULT_GEMINI_MODEL = 'gemini-3.7-flash';
+export const DEFAULT_STT_MODEL = 'whisper-large-v3-turbo';
 
 /**
  * Resolves full AI configuration either from an AiConfig object, a raw API key string,
@@ -18,6 +19,18 @@ export function resolveAiConfig(configOrKey?: string | AiConfig): AiConfig {
         const storedCustomKey = (typeof window !== 'undefined' ? localStorage.getItem('app_custom_api_key') : '') || '';
         const storedCustomModel = (typeof window !== 'undefined' ? localStorage.getItem('app_custom_model') : '') || 'gpt-4o';
 
+        const storedSttProvider = (typeof window !== 'undefined' ? localStorage.getItem('app_stt_provider') : null) as any;
+        const storedSttKey = (typeof window !== 'undefined' ? localStorage.getItem('app_stt_api_key') : '') || '';
+        const storedSttEndpoint = (typeof window !== 'undefined' ? localStorage.getItem('app_stt_endpoint') : '') || 'https://api.groq.com/openai/v1';
+        const storedSttModel = (typeof window !== 'undefined' ? localStorage.getItem('app_stt_model') : '') || DEFAULT_STT_MODEL;
+
+        const sttConfig: SttConfig = {
+            provider: storedSttProvider || 'groq',
+            apiKey: storedSttKey,
+            endpoint: storedSttEndpoint,
+            model: storedSttModel,
+        };
+
         const explicitKey = typeof configOrKey === 'string' ? configOrKey : '';
 
         if (storedProvider === 'custom' && storedCustomEndpoint) {
@@ -28,6 +41,7 @@ export function resolveAiConfig(configOrKey?: string | AiConfig): AiConfig {
                 customModel: storedCustomModel || 'gpt-4o',
                 geminiApiKey: storedGeminiKey || explicitKey,
                 geminiModel: storedGeminiModel,
+                sttConfig,
             };
         }
 
@@ -36,6 +50,7 @@ export function resolveAiConfig(configOrKey?: string | AiConfig): AiConfig {
             apiKey: explicitKey || storedGeminiKey,
             geminiApiKey: explicitKey || storedGeminiKey,
             geminiModel: storedGeminiModel || DEFAULT_GEMINI_MODEL,
+            sttConfig,
         };
     }
 
@@ -1344,17 +1359,19 @@ Format:
 
     /**
      * AI Speech-to-Text Transcription for Voice Dictation & Audio Notes:
-     * Transcribes audio memos using Groq Whisper or Gemini before sending
+     * Transcribes audio memos using Groq Whisper (whisper-large-v3-turbo), OpenAI Whisper,
+     * custom OpenAI-compatible audio endpoints, or Gemini fallback before sending
      * to ensure 100% compatibility with all text and multimodal LLM providers.
      */
     async transcribeAudio(
-        apiKeyOrConfig: string | AiConfig,
+        apiKeyOrConfig: string | AiConfig | { sttConfig?: SttConfig } | undefined,
         audioDataUriOrBase64: string,
         mimeType = 'audio/webm'
     ): Promise<string> {
-        const config = resolveAiConfig(apiKeyOrConfig);
+        const config = resolveAiConfig(apiKeyOrConfig as any);
+        const sttConfig = (apiKeyOrConfig as any)?.sttConfig || config.sttConfig;
 
-        // 1. Try server-side transcription route
+        // 1. Try dedicated server-side transcription route
         try {
             const res = await fetch('/api/ai/transcribe', {
                 method: 'POST',
@@ -1362,6 +1379,7 @@ Format:
                 body: JSON.stringify({
                     audioData: audioDataUriOrBase64,
                     mimeType,
+                    sttConfig,
                     config,
                 }),
             });
@@ -1371,12 +1389,45 @@ Format:
                 if (data.transcript) {
                     return data.transcript;
                 }
+            } else {
+                const errorData = await res.json().catch(() => null);
+                if (errorData?.error) {
+                    console.warn('Transcribe route returned error:', errorData.error);
+                }
             }
         } catch (err) {
             console.warn('Server audio transcription route failed, trying direct client path:', err);
         }
 
-        // 2. Direct Gemini audio transcription fallback
+        // 2. Direct client-side Groq / Whisper fallback if key is directly present
+        if (sttConfig?.provider === 'groq' && sttConfig?.apiKey) {
+            try {
+                const cleanBase64 = audioDataUriOrBase64.includes('base64,')
+                    ? audioDataUriOrBase64.split('base64,')[1]
+                    : audioDataUriOrBase64;
+                const binaryString = atob(cleanBase64);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+                const formData = new FormData();
+                formData.append('file', new Blob([bytes], { type: mimeType }), 'speech.webm');
+                formData.append('model', sttConfig.model || 'whisper-large-v3-turbo');
+                formData.append('response_format', 'json');
+
+                const groqRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+                    method: 'POST',
+                    headers: { Authorization: `Bearer ${sttConfig.apiKey}` },
+                    body: formData,
+                });
+                if (groqRes.ok) {
+                    const gData = await groqRes.json();
+                    if (gData.text) return gData.text.trim();
+                }
+            } catch (gErr) {
+                console.warn('Direct client Groq transcription fallback error:', gErr);
+            }
+        }
+
+        // 3. Direct Gemini audio transcription fallback
         try {
             const cleanBase64 = audioDataUriOrBase64.includes('base64,')
                 ? audioDataUriOrBase64.split('base64,')[1]
@@ -1384,7 +1435,7 @@ Format:
 
             const apiKey = config.geminiApiKey || config.apiKey || process.env.NEXT_PUBLIC_GEMINI_API_KEY || '';
             if (!apiKey) {
-                throw new Error('API key is missing for audio transcription.');
+                throw new Error('API key is missing for audio transcription. Please configure your Whisper or Gemini key in Settings.');
             }
 
             const genAI = new GoogleGenerativeAI(apiKey);
@@ -1396,7 +1447,7 @@ Format:
                         mimeType: mimeType || 'audio/webm',
                     },
                 },
-                'Transcribe this clinical voice dictation verbatim. Output ONLY the transcribed text.',
+                'Transcribe this clinical voice dictation verbatim into clean text. Capture all medical terms, dosages, and patient symptoms accurately. Output ONLY the transcribed text.',
             ]);
 
             return result.response.text().trim();

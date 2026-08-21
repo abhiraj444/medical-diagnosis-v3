@@ -162,6 +162,15 @@ export type Case = DiagnosisCase | ContentCase;
 
 export type AiProvider = 'gemini' | 'custom';
 
+export type SttProvider = 'groq' | 'openai' | 'gemini' | 'custom';
+
+export interface SttConfig {
+    provider: SttProvider;
+    apiKey?: string;
+    endpoint?: string;
+    model?: string;
+}
+
 export interface AiConfig {
     provider: AiProvider;
     apiKey?: string;
@@ -170,5 +179,6 @@ export interface AiConfig {
     customEndpoint?: string;
     customApiKey?: string;
     customModel?: string;
+    sttConfig?: SttConfig;
 }
 

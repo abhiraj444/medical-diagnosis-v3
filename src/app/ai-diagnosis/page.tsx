@@ -36,6 +36,8 @@ import { ModeLanguageSelector } from '@/components/ModeLanguageSelector';
 import { LocalDataService, type LocalCase } from '@/lib/LocalDataService';
 import { ClientSideAiService } from '@/lib/ClientSideAiService';
 import { convertPdfToImages, isPdfFile } from '@/lib/pdf-to-images';
+import { compressImagesForAi } from '@/lib/image-compressor';
+import { ImageCompressionOption } from '@/components/ImageCompressionOption';
 import type {
   StructuredQuestion,
   DiagnosisItem,
@@ -89,7 +91,16 @@ function AiDiagnosisContent() {
 
   const { toast } = useToast();
   const { user, loading: authLoading } = useAuth();
-  const { aiConfig, isConfigured, language, audienceMode } = useSettings();
+  const {
+    aiConfig,
+    isConfigured,
+    language,
+    audienceMode,
+    compressImagesForAi,
+    setCompressImagesForAi,
+    targetImageKb,
+    setTargetImageKb,
+  } = useSettings();
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -321,15 +332,22 @@ function AiDiagnosisContent() {
     setIsAnalyzingReport(true);
     setErrorMessage(null);
     try {
+      // 1. Save original full-resolution files to local storage/history
       const imageUrls = await Promise.all(
         files.map((file) => LocalDataService.saveFile(file, user.id))
       );
-      const images = await Promise.all(files.map(fileToDataUri));
+      const rawImages = await Promise.all(files.map(fileToDataUri));
+
+      // 2. Prepare images for AI API: compress down to ~50KB if token optimization is enabled
+      let imagesForAi = rawImages;
+      if (compressImagesForAi && rawImages.length > 0) {
+        imagesForAi = await compressImagesForAi(rawImages, targetImageKb || 50);
+      }
 
       const reportData = await ClientSideAiService.generateReportKnowledge(
         aiConfig,
         patientData.trim() || undefined,
-        images,
+        imagesForAi,
         { language, audienceMode }
       );
 
@@ -337,6 +355,7 @@ function AiDiagnosisContent() {
       setActiveOutputTab('report');
 
       const summaryTitle = reportData.reportType || 'Medical Report Parameter Breakdown';
+      // Store original full-resolution files in the structured case history
       const newStructuredQuestion = { summary: summaryTitle, images: imageUrls };
       setStructuredQuestion(newStructuredQuestion);
       setFilePreviews(imageUrls);
@@ -366,7 +385,9 @@ function AiDiagnosisContent() {
 
       toast({
         title: 'Report Analyzed',
-        description: `Extracted ${reportData.totalParametersCount || 0} parameters with What-If explanations.`,
+        description: `Extracted ${reportData.totalParametersCount || 0} parameters with What-If explanations${
+          compressImagesForAi ? ' (Optimized ~50KB per page)' : ''
+        }.`,
       });
     } catch (error: any) {
       console.error('Report analysis failed:', error);
@@ -397,16 +418,23 @@ function AiDiagnosisContent() {
     setIsLoading(true);
     setErrorMessage(null);
     try {
+      // 1. Save original full-resolution files to local storage/history
       const imageUrls = await Promise.all(
         files.map((file) => LocalDataService.saveFile(file, user.id))
       );
-      const images = await Promise.all(files.map(fileToDataUri));
+      const rawImages = await Promise.all(files.map(fileToDataUri));
+
+      // 2. Prepare images for AI API: compress down to ~50KB if token optimization is enabled
+      let imagesForAi = rawImages;
+      if (compressImagesForAi && rawImages.length > 0) {
+        imagesForAi = await compressImagesForAi(rawImages, targetImageKb || 50);
+      }
 
       // Single comprehensive clinical call with report knowledge extraction
       const analysis = await ClientSideAiService.generateComprehensiveDiagnosis(
         aiConfig,
         patientData.trim() || undefined,
-        images,
+        imagesForAi,
         { language, audienceMode }
       );
 
@@ -419,6 +447,7 @@ function AiDiagnosisContent() {
       }
       setActiveOutputTab('diagnosis');
 
+      // Store original full-resolution files in the structured case history
       const newStructuredQuestion = { summary: analysis.summary, images: imageUrls };
       setStructuredQuestion(newStructuredQuestion);
       setFilePreviews(imageUrls);
@@ -445,7 +474,10 @@ function AiDiagnosisContent() {
 
       const savedId = await LocalDataService.saveCase(caseData);
       if (!currentCaseId) setCurrentCaseId(savedId);
-      toast({ title: 'Diagnosis Generated', description: 'Clinical case analysis and differential saved.' });
+      toast({
+        title: 'Diagnosis Generated',
+        description: `Clinical case analysis complete${compressImagesForAi ? ' (Optimized ~50KB per page)' : ''}.`,
+      });
     } catch (error: any) {
       console.error('Diagnosis failed:', error);
       const msg = error?.message || (typeof error === 'string' ? error : 'Failed to generate diagnosis.');
@@ -734,7 +766,12 @@ function AiDiagnosisContent() {
                     <Label className="text-xs font-semibold">
                       Reports, PDFs &amp; Audio Dictation (ECG, X-Ray, Lab PDFs, Labs)
                     </Label>
-                    <AudioRecorder onAudioRecorded={handleAudioRecorded} />
+                    <AudioRecorder
+                      onAudioRecorded={handleAudioRecorded}
+                      onTranscribe={(text) =>
+                        setPatientData((prev) => (prev ? `${prev}\n\n[Dictation]: ${text}` : text))
+                      }
+                    />
                   </div>
 
                   {/* Audio Attachments List */}
@@ -750,8 +787,11 @@ function AiDiagnosisContent() {
                             duration={audioDurations[index]}
                             transcript={audioTranscripts[index]}
                             isTranscribing={transcribingAudioIndices.has(index)}
+                            onTranscriptGenerated={(t) => {
+                              setAudioTranscripts((prev) => ({ ...prev, [index]: t }));
+                            }}
                             onInsertTranscript={(t) =>
-                              setPatientData((prev) => (prev ? `${prev}\n\n"${t}"` : `"${t}"`))
+                              setPatientData((prev) => (prev ? `${prev}\n\n[Dictation]: ${t}` : t))
                             }
                             onRemove={() => handleRemoveFile(index)}
                           />
@@ -801,6 +841,19 @@ function AiDiagnosisContent() {
                       />
                     </label>
                   </div>
+
+                  {/* Image compression toggle for AI token optimization */}
+                  {files.length > 0 && (
+                    <div className="pt-1.5">
+                      <ImageCompressionOption
+                        enabled={compressImagesForAi}
+                        onToggle={setCompressImagesForAi}
+                        targetKb={targetImageKb || 50}
+                        onTargetKbChange={setTargetImageKb}
+                        attachedCount={files.filter((f) => !f.type.startsWith('audio/')).length}
+                      />
+                    </div>
+                  )}
                 </div>
 
                 {/* Dual Action Buttons: Report Parameters vs Full Clinical Diagnosis */}
