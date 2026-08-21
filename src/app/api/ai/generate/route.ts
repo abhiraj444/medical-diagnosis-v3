@@ -1,0 +1,437 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+
+export const dynamic = 'force-dynamic';
+export const maxDuration = 300; // Allow up to 300s for thinking models (Vercel clamps to plan limit)
+
+const GEMINI_FALLBACK_MODELS = ['gemini-3.7-flash', 'gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash'];
+
+const THINKING_MODELS = ['gemini-3.7-flash', 'gemini-3.1-pro-preview', 'gemini-2.5-flash'];
+
+function isThinkingModel(modelName: string): boolean {
+  return THINKING_MODELS.some((m) => modelName.toLowerCase().includes(m));
+}
+
+function is503Overloaded(err: any): boolean {
+  const msg = (err?.message || '').toLowerCase();
+  return msg.includes('503') || msg.includes('overloaded') || msg.includes('service unavailable');
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseGoogleErrorMessage(err: any): { message: string; statusCode: number } {
+  const raw = err?.message || String(err || '');
+  const rawLower = raw.toLowerCase();
+
+  if (rawLower.includes('api_key_invalid') || rawLower.includes('api key not valid') || rawLower.includes('invalid api key')) {
+    return {
+      message: 'Invalid Google Gemini API Key. Please verify your API key in Settings (or check GEMINI_API_KEY in your Vercel Environment Variables).',
+      statusCode: 401,
+    };
+  }
+
+  if (rawLower.includes('quota') || rawLower.includes('resource_exhausted') || rawLower.includes('429') || rawLower.includes('rate limit')) {
+    return {
+      message: 'Gemini API Rate Limit / Quota Exceeded (429). Please wait a moment before trying again or check your billing quota in Google AI Studio.',
+      statusCode: 429,
+    };
+  }
+
+  if (rawLower.includes('permission_denied') || rawLower.includes('403')) {
+    return {
+      message: 'Gemini API Permission Denied (403). Your API key does not have access to this feature or model.',
+      statusCode: 403,
+    };
+  }
+
+  if (rawLower.includes('not found') || rawLower.includes('404')) {
+    return {
+      message: `Gemini Model Not Found (404). ${raw}`,
+      statusCode: 404,
+    };
+  }
+
+  if (rawLower.includes('safety') || rawLower.includes('blocked') || rawLower.includes('harm_category')) {
+    return {
+      message: 'The AI request was filtered by safety policies. Please adjust or clarify the clinical phrasing.',
+      statusCode: 422,
+    };
+  }
+
+  if (rawLower.includes('service unavailable') || rawLower.includes('503') || rawLower.includes('overloaded')) {
+    return {
+      message: 'Google Gemini service is temporarily overloaded (503). Please retry in a few seconds.',
+      statusCode: 503,
+    };
+  }
+
+  return {
+    message: raw.length > 300 ? raw.slice(0, 300) + '...' : raw,
+    statusCode: 500,
+  };
+}
+
+/**
+ * Transcribe audio via Groq's dedicated Whisper endpoint.
+ * Returns the transcript text, or null if transcription fails.
+ */
+async function transcribeAudioViaGroq(
+  audioBase64: string,
+  audioMimeType: string,
+  apiKey: string,
+  baseEndpoint: string
+): Promise<string | null> {
+  try {
+    // Derive the transcription endpoint from the base endpoint
+    let transcriptionUrl = baseEndpoint.replace(/\/+$/, '');
+    // Strip /chat/completions if present
+    transcriptionUrl = transcriptionUrl.replace(/\/chat\/completions$/, '');
+    transcriptionUrl += '/audio/transcriptions';
+
+    // Convert base64 to binary
+    const binaryString = atob(audioBase64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+
+    // Determine file extension from mime type
+    const extMap: Record<string, string> = {
+      'audio/webm': 'webm',
+      'audio/mp3': 'mp3',
+      'audio/mpeg': 'mp3',
+      'audio/wav': 'wav',
+      'audio/ogg': 'ogg',
+      'audio/mp4': 'm4a',
+      'audio/flac': 'flac',
+      'audio/aac': 'aac',
+    };
+    const ext = extMap[audioMimeType] || 'webm';
+
+    // Create FormData with the audio file
+    const formData = new FormData();
+    const blob = new Blob([bytes], { type: audioMimeType });
+    formData.append('file', blob, `audio.${ext}`);
+    formData.append('model', 'whisper-large-v3-turbo');
+    formData.append('response_format', 'json');
+
+    const res = await fetch(transcriptionUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: formData,
+    });
+
+    if (!res.ok) {
+      console.warn(`Groq Whisper transcription failed (${res.status}):`, await res.text());
+      return null;
+    }
+
+    const data = await res.json();
+    return data.text || null;
+  } catch (err) {
+    console.warn('Audio transcription failed:', err);
+    return null;
+  }
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const body = await req.json();
+    const { prompt, images = [], config = {} } = body;
+
+    if (!prompt || typeof prompt !== 'string') {
+      return NextResponse.json({ error: 'Prompt is required and must be a text string.' }, { status: 400 });
+    }
+
+    // --- 1. Custom Provider Flow (OpenAI / OpenRouter / Groq / DeepSeek / Ollama) ---
+    if (config.provider === 'custom') {
+      let endpoint = (config.customEndpoint || '').trim();
+      if (!endpoint) {
+        return NextResponse.json(
+          { error: 'Custom LLM endpoint is not configured. Please set your endpoint URL in Settings.' },
+          { status: 400 }
+        );
+      }
+
+      if (!endpoint.endsWith('/chat/completions')) {
+        endpoint = endpoint.replace(/\/+$/, '') + '/chat/completions';
+      }
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      const key = config.customApiKey || config.apiKey;
+      if (key) {
+        headers['Authorization'] = `Bearer ${key}`;
+      }
+
+      // Detect if this is a Groq endpoint for special audio handling
+      const isGroqEndpoint = endpoint.toLowerCase().includes('groq.com');
+      const imageCount = images ? images.filter((i) => i.mimeType?.startsWith('image/')).length : 0;
+
+      // Process media: transcribe audio for providers that don't support inline audio
+      let augmentedPrompt = prompt;
+      if (imageCount > 0) {
+        augmentedPrompt = `[CLINICAL ATTACHMENTS: ${imageCount} medical document/image page(s) attached. Inspect and analyze all visible findings, lab parameters, test results, numbers, waveforms, patient info, and clinical text directly from the attached visual image(s).]\n\n${prompt}`;
+      }
+
+      const contentParts: any[] = [{ type: 'text', text: '' }]; // text placeholder, will be set later
+
+      if (images && images.length > 0) {
+        for (const img of images) {
+          if (!img.data) continue;
+
+          if (img.mimeType.startsWith('image/')) {
+            // Images: standard image_url format (works for Groq vision models, OpenAI, etc.)
+            contentParts.push({
+              type: 'image_url',
+              image_url: {
+                url: `data:${img.mimeType};base64,${img.data}`,
+              },
+            });
+          } else if (img.mimeType.startsWith('audio/')) {
+            if (isGroqEndpoint && key) {
+              // Groq: transcribe audio via dedicated Whisper endpoint first
+              const transcript = await transcribeAudioViaGroq(img.data, img.mimeType, key, endpoint);
+              if (transcript) {
+                augmentedPrompt = `[Audio Transcript from voice memo/dictation]:\n"${transcript}"\n\n${augmentedPrompt}`;
+              } else {
+                augmentedPrompt = `[Audio memo attached but transcription failed. Please analyze based on text input only.]\n\n${augmentedPrompt}`;
+              }
+            } else {
+              // Other OpenAI-compatible providers: try input_audio format
+              contentParts.push({
+                type: 'input_audio',
+                input_audio: {
+                  data: img.data,
+                  format: img.mimeType.replace('audio/', ''),
+                },
+              });
+            }
+          } else if (img.mimeType === 'application/pdf') {
+            // PDFs: most custom providers don't support inline PDFs
+            augmentedPrompt = `[PDF document was attached. If you can process the document content from the provided data, please analyze it. Otherwise, focus on the text input.]\n\n${augmentedPrompt}`;
+          }
+        }
+      }
+
+      // Set the text content part with the (potentially augmented) prompt
+      contentParts[0].text = augmentedPrompt;
+
+      // Auto-select a vision-capable model on Groq if images are attached and current model is text-only
+      let initialModel = config.customModel || 'gpt-4o';
+      if (imageCount > 0 && isGroqEndpoint) {
+        const isKnownGroqVision = initialModel.includes('vision') || initialModel.includes('qwen');
+        if (!isKnownGroqVision) {
+          console.log(`Auto-routing Groq request with images from ${initialModel} to llama-3.2-11b-vision-preview`);
+          initialModel = 'llama-3.2-11b-vision-preview';
+        }
+      }
+
+      const payload = {
+        model: initialModel,
+        messages: [
+          {
+            role: 'user',
+            content: contentParts.length === 1 ? augmentedPrompt : contentParts,
+          },
+        ],
+        temperature: 0.2,
+      };
+
+      try {
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(payload),
+        });
+
+        if (!res.ok) {
+          const errText = await res.text().catch(() => 'Unknown error');
+          const errLower = errText.toLowerCase();
+
+          // If multimodal was rejected on Groq, attempt secondary vision models
+          if (contentParts.length > 1 && isGroqEndpoint) {
+            const alternateGroqModels = ['llama-3.2-11b-vision-preview', 'qwen/qwen3.6-27b', 'llama-3.2-90b-vision-preview'].filter(
+              (m) => m !== initialModel
+            );
+
+            for (const altModel of alternateGroqModels) {
+              console.warn(`Groq vision retry with alternate model ${altModel}...`);
+              const altPayload = { ...payload, model: altModel };
+              const altRes = await fetch(endpoint, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify(altPayload),
+              });
+              if (altRes.ok) {
+                const data = await altRes.json();
+                return NextResponse.json({ text: data.choices?.[0]?.message?.content || '' });
+              }
+            }
+          }
+
+          let parsedMsg = errText;
+          try {
+            const errJson = JSON.parse(errText);
+            parsedMsg = errJson.error?.message || errJson.message || errText;
+          } catch {
+            // keep raw text
+          }
+
+          // Provide helpful guidance for common custom provider errors
+          let userHint = '';
+          if (
+            errLower.includes('does not support image') ||
+            errLower.includes('only text') ||
+            errLower.includes('vision') ||
+            errLower.includes('must be a string') ||
+            errLower.includes('unprocessable')
+          ) {
+            userHint =
+              ' Tip: This model does not support image inputs. Try selecting a vision-capable model (e.g. Gemini 3.7 Flash, Llama 3.2 Vision, or GPT-4o) in Settings to analyze medical images.';
+          }
+
+          return NextResponse.json(
+            { error: `Custom AI Endpoint Error (${res.status}): ${parsedMsg.slice(0, 300)}${userHint}` },
+            { status: res.status >= 400 && res.status < 600 ? res.status : 500 }
+          );
+        }
+
+        const data = await res.json();
+        const replyText = data.choices?.[0]?.message?.content || '';
+        return NextResponse.json({ text: replyText });
+      } catch (fetchErr: any) {
+        return NextResponse.json(
+          {
+            error: `Failed to connect to custom AI endpoint (${endpoint}): ${fetchErr?.message || 'Network error'}`,
+          },
+          { status: 502 }
+        );
+      }
+    }
+
+    // --- 2. Google Gemini Provider Flow (with Streaming + Retry) ---
+    const apiKey =
+      config.geminiApiKey ||
+      config.apiKey ||
+      process.env.GEMINI_API_KEY ||
+      process.env.NEXT_PUBLIC_GEMINI_API_KEY ||
+      '';
+
+    if (!apiKey) {
+      return NextResponse.json(
+        {
+          error:
+            'Google Gemini API Key is missing. Please set your API key in Settings (or set GEMINI_API_KEY in your Vercel Project Environment Variables).',
+        },
+        { status: 400 }
+      );
+    }
+
+    const requestedModel = config.geminiModel || process.env.GEMINI_MODEL || 'gemini-3.7-flash';
+    const modelsToTry = [requestedModel, ...GEMINI_FALLBACK_MODELS.filter((m) => m !== requestedModel)];
+
+    const genAI = new GoogleGenerativeAI(apiKey);
+
+    const parts: any[] = [prompt];
+    if (images && images.length > 0) {
+      for (const img of images) {
+        if (img.data) {
+          parts.push({
+            inlineData: {
+              data: img.data,
+              mimeType: img.mimeType || 'image/jpeg',
+            },
+          });
+        }
+      }
+    }
+
+    let lastError: any = null;
+
+    for (const modelName of modelsToTry) {
+      // Configure model with optional thinking budget for thinking models
+      const modelConfig: any = { model: modelName };
+      if (isThinkingModel(modelName)) {
+        modelConfig.generationConfig = {
+          thinkingConfig: {
+            thinkingBudget: 4096,
+          },
+        };
+      }
+
+      // Attempt with retry for 503 overloaded errors
+      const maxRetries = 2;
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+          const model = genAI.getGenerativeModel(modelConfig);
+
+          // Use streaming to prevent Vercel/proxy timeout for long-running thinking models
+          const result = await model.generateContentStream(parts);
+
+          // Collect all streamed chunks into a single response
+          let responseText = '';
+          for await (const chunk of result.stream) {
+            const chunkText = chunk.text();
+            if (chunkText) {
+              responseText += chunkText;
+            }
+          }
+
+          return NextResponse.json({ text: responseText, modelUsed: modelName });
+        } catch (err: any) {
+          lastError = err;
+          const errMsg = (err?.message || '').toLowerCase();
+
+          // On 503 overloaded, retry once with delay before trying next model
+          if (is503Overloaded(err) && attempt < maxRetries - 1) {
+            console.warn(`Model ${modelName} returned 503 (attempt ${attempt + 1}), retrying in 2s...`);
+            await sleep(2000);
+            continue;
+          }
+
+          // On 404/not found, try next model immediately
+          if (errMsg.includes('not found') || errMsg.includes('404') || errMsg.includes('unsupported model')) {
+            console.warn(`Model ${modelName} not found, attempting fallback model...`);
+            break; // break retry loop, continue model loop
+          }
+
+          // On 503 after retries exhausted, try next model
+          if (is503Overloaded(err)) {
+            console.warn(`Model ${modelName} still overloaded after retries, attempting fallback model...`);
+            break;
+          }
+
+          // For other errors (invalid API key, quota, etc.), fail immediately
+          const { message, statusCode } = parseGoogleErrorMessage(err);
+          return NextResponse.json(
+            { error: message, rawError: err?.message || String(err || '') },
+            { status: statusCode }
+          );
+        }
+      }
+    }
+
+    const { message, statusCode } = parseGoogleErrorMessage(lastError);
+    return NextResponse.json(
+      {
+        error: message,
+        rawError: lastError?.message || String(lastError || ''),
+      },
+      { status: statusCode }
+    );
+  } catch (error: any) {
+    console.error('Unhandled AI API Route Error:', error);
+    return NextResponse.json(
+      {
+        error: error?.message || 'An unexpected internal error occurred while processing the clinical question.',
+      },
+      { status: 500 }
+    );
+  }
+}
