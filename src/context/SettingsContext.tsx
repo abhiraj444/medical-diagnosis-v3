@@ -56,6 +56,10 @@ interface SettingsContextType {
     setCompressImagesForAi: (enabled: boolean) => void;
     targetImageKb: number;
     setTargetImageKb: (kb: number) => void;
+    mergeImagesIntoSingle: boolean;
+    setMergeImagesIntoSingle: (enabled: boolean) => void;
+    mergeTargetKb: number;
+    setMergeTargetKb: (kb: number) => void;
 }
 
 const SettingsContext = createContext<SettingsContextType | undefined>(undefined);
@@ -80,6 +84,8 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     const [audienceMode, setAudienceModeInternal] = useState<AudienceMode>('doctor');
     const [compressImagesForAi, setCompressImagesForAiInternal] = useState<boolean>(true);
     const [targetImageKb, setTargetImageKbInternal] = useState<number>(50);
+    const [mergeImagesIntoSingle, setMergeImagesIntoSingleInternal] = useState<boolean>(false);
+    const [mergeTargetKb, setMergeTargetKbInternal] = useState<number>(150);
 
     useEffect(() => {
         // Check if server-side environment variable is configured
@@ -170,6 +176,19 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
                 setTargetImageKbInternal(parsed);
             }
         }
+
+        const savedMerge = localStorage.getItem('app_merge_images_into_single');
+        if (savedMerge !== null) {
+            setMergeImagesIntoSingleInternal(savedMerge === 'true');
+        }
+
+        const savedMergeTargetKb = localStorage.getItem('app_merge_target_kb');
+        if (savedMergeTargetKb) {
+            const parsed = parseInt(savedMergeTargetKb, 10);
+            if (!isNaN(parsed) && parsed >= 50 && parsed <= 500) {
+                setMergeTargetKbInternal(parsed);
+            }
+        }
     }, []);
 
     const setAiProvider = (provider: AiProvider) => {
@@ -250,6 +269,17 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         setTargetImageKbInternal(sanitized);
     };
 
+    const setMergeImagesIntoSingle = (enabled: boolean) => {
+        localStorage.setItem('app_merge_images_into_single', String(enabled));
+        setMergeImagesIntoSingleInternal(enabled);
+    };
+
+    const setMergeTargetKb = (kb: number) => {
+        const sanitized = Math.max(50, Math.min(500, kb));
+        localStorage.setItem('app_merge_target_kb', String(sanitized));
+        setMergeTargetKbInternal(sanitized);
+    };
+
     // Derived values
     const isConfigured =
         aiProvider === 'gemini'
@@ -317,6 +347,10 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
                 setCompressImagesForAi,
                 targetImageKb,
                 setTargetImageKb,
+                mergeImagesIntoSingle,
+                setMergeImagesIntoSingle,
+                mergeTargetKb,
+                setMergeTargetKb,
             }}
         >
             {children}

@@ -176,6 +176,10 @@ export default function SettingsPage() {
     setCompressImagesForAi,
     targetImageKb,
     setTargetImageKb,
+    mergeImagesIntoSingle,
+    setMergeImagesIntoSingle,
+    mergeTargetKb,
+    setMergeTargetKb,
   } = useSettings();
 
   // Local form state
@@ -196,6 +200,8 @@ export default function SettingsPage() {
 
   const [localCompressImages, setLocalCompressImages] = useState<boolean>(compressImagesForAi);
   const [localTargetKb, setLocalTargetKb] = useState<number>(targetImageKb || 50);
+  const [localMergeImages, setLocalMergeImages] = useState<boolean>(mergeImagesIntoSingle);
+  const [localMergeTargetKb, setLocalMergeTargetKb] = useState<number>(mergeTargetKb || 150);
 
   const [showGeminiKey, setShowGeminiKey] = useState(false);
   const [showCustomKey, setShowCustomKey] = useState(false);
@@ -355,14 +361,16 @@ export default function SettingsPage() {
 
     setCompressImagesForAi(localCompressImages);
     setTargetImageKb(localTargetKb);
+    setMergeImagesIntoSingle(localMergeImages);
+    setMergeTargetKb(localMergeTargetKb);
 
     toast({
       title: 'Settings Saved',
       description: `Active AI: ${provider === 'gemini' ? 'Google Gemini' : 'Custom LLM'} (${
         provider === 'gemini' ? localGeminiModel || DEFAULT_GEMINI_MODEL : localCustomModel
-      }) • STT: ${localSttProvider.toUpperCase()} (${localSttModel || DEFAULT_STT_MODEL}) • Image Compression: ${
-        localCompressImages ? `~${localTargetKb}KB` : 'Off'
-      }`,
+      }) • STT: ${localSttProvider.toUpperCase()} (${localSttModel || DEFAULT_STT_MODEL}) • Image Optimization: ${
+        localCompressImages ? `~${localTargetKb}KB/img` : 'Off'
+      }${localMergeImages ? ` + Merge Single-Panel (~${localMergeTargetKb}KB)` : ''}`,
     });
     router.back();
   };
@@ -381,12 +389,14 @@ export default function SettingsPage() {
 
     setLocalCompressImages(true);
     setLocalTargetKb(50);
+    setLocalMergeImages(false);
+    setLocalMergeTargetKb(150);
     setTestResult(null);
     setSttTestResult(null);
 
     toast({
       title: 'Reset to Defaults',
-      description: `Gemini (${DEFAULT_GEMINI_MODEL}), STT Whisper (${DEFAULT_STT_MODEL}), and ~50KB token compression restored.`,
+      description: `Gemini (${DEFAULT_GEMINI_MODEL}), STT Whisper (${DEFAULT_STT_MODEL}), and token optimization restored.`,
     });
   };
 
@@ -426,7 +436,7 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
-      {/* Document & Image Compression (Token Optimization) */}
+      {/* Document & Image Compression & Multi-Image Stitching (Token Optimization) */}
       <Card className="border border-border shadow-xs overflow-hidden rounded-2xl bg-card">
         <div className="h-1 w-full bg-gradient-to-r from-emerald-500/50 via-teal-500/50 to-primary/50" />
         <CardHeader className="bg-muted/20 border-b border-border/70 p-5">
@@ -434,20 +444,21 @@ export default function SettingsPage() {
             <div className="space-y-1">
               <CardTitle className="text-base sm:text-lg font-bold flex items-center gap-2 text-foreground">
                 <Sparkles className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
-                Document &amp; Image Token Optimization (~50KB)
+                Document &amp; Image Token Optimization &amp; Multi-Page Stitcher
               </CardTitle>
               <CardDescription className="text-xs text-muted-foreground">
-                Compress uploaded medical documents, PDFs, and photos before sending to AI models to save tokens and minimize latency.
+                Compress and stitch uploaded medical documents, multi-page PDFs, and photos before sending to AI models to save tokens and minimize latency.
               </CardDescription>
             </div>
           </div>
         </CardHeader>
-        <CardContent className="p-5 sm:p-6 space-y-4">
+        <CardContent className="p-5 sm:p-6 space-y-5">
+          {/* Option 1: Individual Image Auto-Compression */}
           <div className="flex items-center justify-between gap-4 p-3.5 rounded-xl border bg-muted/30 border-border/70">
             <div className="space-y-1">
               <div className="flex items-center gap-2">
                 <Label htmlFor="settings-compress-toggle" className="text-sm font-bold text-foreground cursor-pointer">
-                  Auto-Compress Uploaded Images to ~{localTargetKb}KB
+                  Auto-Compress Uploaded Images (~{localTargetKb}KB each)
                 </Label>
                 {localCompressImages && (
                   <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-bold border border-emerald-500/30">
@@ -456,7 +467,7 @@ export default function SettingsPage() {
                 )}
               </div>
               <p className="text-xs text-muted-foreground">
-                When enabled, all uploaded images and PDF pages are converted and downscaled to ~{localTargetKb}KB only for the AI API prompt. The original full-fidelity images remain saved in your local history untouched.
+                When enabled, each uploaded image and PDF page is converted and downscaled to ~{localTargetKb}KB only for the AI API prompt. The original full-fidelity images remain saved in your local history untouched.
               </p>
             </div>
             <input
@@ -471,7 +482,7 @@ export default function SettingsPage() {
           {localCompressImages && (
             <div className="p-3.5 rounded-xl border border-emerald-500/20 bg-emerald-500/5 space-y-2">
               <Label className="text-xs font-semibold text-foreground">
-                Target Image Size for AI Prompts
+                Target Size per Individual Image
               </Label>
               <div className="flex flex-wrap gap-2">
                 {[
@@ -494,11 +505,72 @@ export default function SettingsPage() {
                   </button>
                 ))}
               </div>
-              <p className="text-[11px] text-muted-foreground pt-1">
-                ✓ <strong>History Preservation</strong>: Your stored case files in Dexie always preserve the uncompressed, original resolution uploads for crisp offline review.
-              </p>
             </div>
           )}
+
+          {/* Option 2: Convert/Stitch All Images into 1 Single Image (~150KB) */}
+          <div className="flex items-center justify-between gap-4 p-3.5 rounded-xl border bg-muted/30 border-border/70">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <Label htmlFor="settings-merge-toggle" className="text-sm font-bold text-foreground cursor-pointer">
+                  Convert All Uploaded Images into 1 Single Composite Image (~{localMergeTargetKb}KB)
+                </Label>
+                {localMergeImages && (
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-blue-500/15 text-blue-700 dark:text-blue-300 font-bold border border-blue-500/30">
+                    Multi-Page Merger
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Stitches multi-page lab reports, prescriptions, and clinical photos side-by-side into a single composite canvas (~{localMergeTargetKb}KB) for the AI model. Reduces multi-turn vision tokens while keeping document context unified.
+              </p>
+            </div>
+            <input
+              id="settings-merge-toggle"
+              type="checkbox"
+              checked={localMergeImages}
+              onChange={(e) => setLocalMergeImages(e.target.checked)}
+              className="h-5 w-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+            />
+          </div>
+
+          {localMergeImages && (
+            <div className="p-3.5 rounded-xl border border-blue-500/20 bg-blue-500/5 space-y-2">
+              <Label className="text-xs font-semibold text-foreground">
+                Target Composite Canvas Size for AI Prompts
+              </Label>
+              <div className="flex flex-wrap gap-2">
+                {[
+                  { kb: 100, label: '100 KB (Max Token Efficiency)' },
+                  { kb: 150, label: '150 KB (Recommended / Crisp Multi-Page)' },
+                  { kb: 200, label: '200 KB (High Density Documents)' },
+                  { kb: 250, label: '250 KB (Ultra Detailed Scans)' },
+                ].map((item) => (
+                  <button
+                    key={item.kb}
+                    type="button"
+                    onClick={() => setLocalMergeTargetKb(item.kb)}
+                    className={`text-xs px-3 py-1.5 rounded-lg border transition-all ${
+                      localMergeTargetKb === item.kb
+                        ? 'bg-blue-600 text-white font-bold border-blue-600 shadow-xs'
+                        : 'bg-background hover:bg-muted text-foreground border-border'
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="p-3 rounded-xl bg-muted/40 border border-border text-[11px] text-muted-foreground space-y-1">
+            <p className="font-semibold text-foreground flex items-center gap-1.5">
+              <span>🛡️ Patient Case History Integrity</span>
+            </p>
+            <p>
+              Regardless of your AI prompt compression or single-image stitching settings, <strong>all uploaded files and multi-page documents are stored in full original resolution</strong> in your local Dexie database and Case History.
+            </p>
+          </div>
         </CardContent>
       </Card>
 

@@ -41,7 +41,7 @@ import { AudioPlayerCard } from '@/components/AudioPlayerCard';
 import { FollowUpChat } from '@/components/FollowUpChat';
 import type { RecordedAudio } from '@/hooks/useAudioRecorder';
 import { convertPdfToImages, isPdfFile } from '@/lib/pdf-to-images';
-import { compressImagesForAi } from '@/lib/image-compressor';
+import { compressImagesForAi, prepareImagesForAiPrompt } from '@/lib/image-compressor';
 import { ImageCompressionOption } from '@/components/ImageCompressionOption';
 import Link from 'next/link';
 
@@ -85,6 +85,10 @@ function ContentGeneratorContent() {
     setCompressImagesForAi,
     targetImageKb,
     setTargetImageKb,
+    mergeImagesIntoSingle,
+    setMergeImagesIntoSingle,
+    mergeTargetKb,
+    setMergeTargetKb,
   } = useSettings();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -375,11 +379,13 @@ function ContentGeneratorContent() {
       );
       const rawImages = await Promise.all(imageFiles.map(fileToDataUri));
 
-      // 2. Prepare images for AI API: compress down to ~50KB if token optimization is enabled
-      let imagesForAi = rawImages;
-      if (isCompressionEnabled && rawImages.length > 0) {
-        imagesForAi = await compressImagesForAi(rawImages, targetImageKb || 50);
-      }
+      // 2. Prepare images for AI API: compress down or merge into single panel based on settings
+      const { processedImages: imagesForAi, summaryText: prepSummary } = await prepareImagesForAiPrompt(rawImages, {
+        compressEnabled: isCompressionEnabled,
+        targetKb: targetImageKb || 50,
+        mergeIntoSingle: mergeImagesIntoSingle,
+        mergeTargetKb: mergeTargetKb || 150,
+      });
 
       const [response, summaryResponse] = await Promise.all([
         ClientSideAiService.answerClinicalQuestion(aiConfig, question.trim() || undefined, imagesForAi, { language, audienceMode }),
@@ -417,7 +423,7 @@ function ContentGeneratorContent() {
       if (!currentCaseId) setCurrentCaseId(savedId);
       toast({
         title: 'Answer Generated',
-        description: `Clinical question analyzed successfully${isCompressionEnabled ? ' (Optimized ~50KB per image)' : ''}.`,
+        description: `Clinical question analyzed successfully (${prepSummary}).`,
       });
     } catch (error: any) {
       console.error('Question submission failed:', error);
@@ -897,7 +903,7 @@ function ContentGeneratorContent() {
                       </label>
                     </div>
 
-                    {/* Image compression toggle for AI token optimization */}
+                    {/* Image compression and multi-image stitching toggle for AI token optimization */}
                     {imageFiles.length > 0 && (
                       <div className="pt-1.5">
                         <ImageCompressionOption
@@ -905,6 +911,10 @@ function ContentGeneratorContent() {
                           onToggle={setCompressImagesForAi}
                           targetKb={targetImageKb || 50}
                           onTargetKbChange={setTargetImageKb}
+                          mergeIntoSingle={mergeImagesIntoSingle}
+                          onMergeToggle={setMergeImagesIntoSingle}
+                          mergeTargetKb={mergeTargetKb || 150}
+                          attachedImages={imageFiles.filter((f) => !f.type.startsWith('audio/'))}
                           attachedCount={imageFiles.filter((f) => !f.type.startsWith('audio/')).length}
                         />
                       </div>
