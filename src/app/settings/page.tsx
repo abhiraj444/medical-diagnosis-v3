@@ -8,9 +8,9 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
-import { useSettings, DEFAULT_GEMINI_MODEL } from '@/context/SettingsContext';
+import { useSettings, DEFAULT_GEMINI_MODEL, DEFAULT_STT_MODEL } from '@/context/SettingsContext';
 import { ClientSideAiService } from '@/lib/ClientSideAiService';
-import type { AiProvider, AiConfig } from '@/types';
+import type { AiProvider, AiConfig, SttProvider } from '@/types';
 import {
   ArrowLeft,
   Save,
@@ -26,6 +26,11 @@ import {
   RotateCcw,
   Activity,
   Sliders,
+  Mic,
+  Volume2,
+  Radio,
+  FileAudio,
+  Check,
 } from 'lucide-react';
 
 import { ModeLanguageSelector } from '@/components/ModeLanguageSelector';
@@ -96,6 +101,52 @@ const CUSTOM_PROVIDER_PRESETS = [
   },
 ];
 
+const STT_PROVIDER_PRESETS: Array<{
+  id: SttProvider;
+  name: string;
+  endpoint: string;
+  defaultModel: string;
+  desc: string;
+  tag?: string;
+}> = [
+  {
+    id: 'groq',
+    name: 'Groq Cloud (Whisper Turbo)',
+    endpoint: 'https://api.groq.com/openai/v1',
+    defaultModel: 'whisper-large-v3-turbo',
+    desc: 'Lightning fast (~200ms) Whisper Large V3 Turbo. Exceptional clinical transcription accuracy.',
+    tag: 'Recommended',
+  },
+  {
+    id: 'openai',
+    name: 'OpenAI Whisper',
+    endpoint: 'https://api.openai.com/v1',
+    defaultModel: 'whisper-1',
+    desc: 'Official OpenAI speech-to-text API model (whisper-1).',
+  },
+  {
+    id: 'custom',
+    name: 'Custom OpenAI-Compatible Audio',
+    endpoint: 'https://api.groq.com/openai/v1',
+    defaultModel: 'whisper-large-v3-turbo',
+    desc: 'Any self-hosted or cloud OpenAI-compatible /audio/transcriptions server.',
+  },
+  {
+    id: 'gemini',
+    name: 'Google Gemini Audio Fallback',
+    endpoint: '',
+    defaultModel: 'gemini-2.5-flash',
+    desc: 'Direct multimodal audio transcription using your Gemini API key.',
+  },
+];
+
+const STT_MODEL_PRESETS = [
+  'whisper-large-v3-turbo',
+  'whisper-large-v3',
+  'distil-whisper-large-v3-en',
+  'whisper-1',
+];
+
 export default function SettingsPage() {
   const router = useRouter();
   const { toast } = useToast();
@@ -113,6 +164,14 @@ export default function SettingsPage() {
     setCustomApiKey,
     customModel,
     setCustomModel,
+    sttProvider,
+    setSttProvider,
+    sttApiKey,
+    setSttApiKey,
+    sttEndpoint,
+    setSttEndpoint,
+    sttModel,
+    setSttModel,
     compressImagesForAi,
     setCompressImagesForAi,
     targetImageKb,
@@ -128,15 +187,31 @@ export default function SettingsPage() {
   const [localCustomKey, setLocalCustomKey] = useState(customApiKey);
   const [localCustomModel, setLocalCustomModel] = useState(customModel || 'gpt-4o');
 
+  // STT (Speech-to-Text) Local State
+  const [localSttProvider, setLocalSttProvider] = useState<SttProvider>(sttProvider || 'groq');
+  const [localSttApiKey, setLocalSttApiKey] = useState(sttApiKey || '');
+  const [localSttEndpoint, setLocalSttEndpoint] = useState(sttEndpoint || 'https://api.groq.com/openai/v1');
+  const [localSttModel, setLocalSttModel] = useState(sttModel || DEFAULT_STT_MODEL);
+  const [showSttKey, setShowSttKey] = useState(false);
+
   const [localCompressImages, setLocalCompressImages] = useState<boolean>(compressImagesForAi);
   const [localTargetKb, setLocalTargetKb] = useState<number>(targetImageKb || 50);
 
   const [showGeminiKey, setShowGeminiKey] = useState(false);
   const [showCustomKey, setShowCustomKey] = useState(false);
 
-  // Connection Test state
+  // Connection Test state for LLM
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{
+    success: boolean;
+    message: string;
+    modelUsed: string;
+    latencyMs?: number;
+  } | null>(null);
+
+  // Connection Test state for STT Whisper
+  const [isTestingStt, setIsTestingStt] = useState(false);
+  const [sttTestResult, setSttTestResult] = useState<{
     success: boolean;
     message: string;
     modelUsed: string;
@@ -150,6 +225,19 @@ export default function SettingsPage() {
     toast({
       title: `${preset.name} Preset Selected`,
       description: `Endpoint set to ${preset.endpoint} with model ${preset.defaultModel}`,
+    });
+  };
+
+  const handleApplySttPreset = (preset: (typeof STT_PROVIDER_PRESETS)[0]) => {
+    setLocalSttProvider(preset.id);
+    if (preset.endpoint) {
+      setLocalSttEndpoint(preset.endpoint);
+    }
+    setLocalSttModel(preset.defaultModel);
+    setSttTestResult(null);
+    toast({
+      title: `${preset.name} Selected`,
+      description: `Speech-to-Text set to ${preset.name} with model ${preset.defaultModel}`,
     });
   };
 
@@ -193,6 +281,67 @@ export default function SettingsPage() {
     }
   };
 
+  const handleTestStt = async () => {
+    setIsTestingStt(true);
+    setSttTestResult(null);
+    const startTime = Date.now();
+
+    try {
+      // 0.1s standard PCM WAV header base64 payload to verify endpoint and API key validity
+      const dummyWavBase64 = 'UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+      const res = await fetch('/api/ai/transcribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          audioData: dummyWavBase64,
+          mimeType: 'audio/wav',
+          sttConfig: {
+            provider: localSttProvider,
+            apiKey: localSttApiKey.trim(),
+            endpoint: localSttEndpoint.trim(),
+            model: localSttModel.trim() || DEFAULT_STT_MODEL,
+          },
+          config: {
+            geminiApiKey: localGeminiKey.trim(),
+          },
+        }),
+      });
+
+      const data = await res.json();
+      const latencyMs = Date.now() - startTime;
+
+      if (res.ok) {
+        setSttTestResult({
+          success: true,
+          message: `STT Whisper endpoint is active and authenticated (${latencyMs}ms). Provider: ${data.provider || localSttProvider}.`,
+          modelUsed: data.model || localSttModel || DEFAULT_STT_MODEL,
+          latencyMs,
+        });
+        toast({
+          title: 'STT Whisper Verified',
+          description: `Speech-to-Text responded in ${latencyMs}ms (${localSttProvider}).`,
+        });
+      } else {
+        throw new Error(data.error || 'Failed to verify speech-to-text endpoint.');
+      }
+    } catch (err: any) {
+      const latencyMs = Date.now() - startTime;
+      setSttTestResult({
+        success: false,
+        message: err?.message || 'STT Connection test failed. Please verify your STT API key and endpoint URL.',
+        modelUsed: localSttModel || DEFAULT_STT_MODEL,
+        latencyMs,
+      });
+      toast({
+        variant: 'destructive',
+        title: 'STT Verification Failed',
+        description: err?.message || 'Could not verify STT endpoint.',
+      });
+    } finally {
+      setIsTestingStt(false);
+    }
+  };
+
   const handleSave = () => {
     setAiProvider(provider);
     setGeminiApiKey(localGeminiKey.trim());
@@ -202,14 +351,21 @@ export default function SettingsPage() {
     setCustomApiKey(localCustomKey.trim());
     setCustomModel(localCustomModel.trim() || 'gpt-4o');
 
+    setSttProvider(localSttProvider);
+    setSttApiKey(localSttApiKey.trim());
+    setSttEndpoint(localSttEndpoint.trim());
+    setSttModel(localSttModel.trim() || DEFAULT_STT_MODEL);
+
     setCompressImagesForAi(localCompressImages);
     setTargetImageKb(localTargetKb);
 
     toast({
       title: 'Settings Saved',
-      description: `Active AI Provider: ${provider === 'gemini' ? 'Google Gemini' : 'Custom LLM'} (${
+      description: `Active AI: ${provider === 'gemini' ? 'Google Gemini' : 'Custom LLM'} (${
         provider === 'gemini' ? localGeminiModel || DEFAULT_GEMINI_MODEL : localCustomModel
-      }) • Image Compression: ${localCompressImages ? `~${localTargetKb}KB (Token Saver)` : 'Off (Original)'}`,
+      }) • STT: ${localSttProvider.toUpperCase()} (${localSttModel || DEFAULT_STT_MODEL}) • Image Compression: ${
+        localCompressImages ? `~${localTargetKb}KB` : 'Off'
+      }`,
     });
     router.back();
   };
@@ -220,12 +376,20 @@ export default function SettingsPage() {
     setLocalCustomEndpoint('');
     setLocalCustomKey('');
     setLocalCustomModel('gpt-4o');
+
+    setLocalSttProvider('groq');
+    setLocalSttApiKey('');
+    setLocalSttEndpoint('https://api.groq.com/openai/v1');
+    setLocalSttModel(DEFAULT_STT_MODEL);
+
     setLocalCompressImages(true);
     setLocalTargetKb(50);
     setTestResult(null);
+    setSttTestResult(null);
+
     toast({
       title: 'Reset to Defaults',
-      description: `Default Gemini model restored to ${DEFAULT_GEMINI_MODEL} with ~50KB token compression enabled.`,
+      description: `Gemini (${DEFAULT_GEMINI_MODEL}), STT Whisper (${DEFAULT_STT_MODEL}), and ~50KB token compression restored.`,
     });
   };
 
@@ -338,6 +502,249 @@ export default function SettingsPage() {
               </p>
             </div>
           )}
+        </CardContent>
+      </Card>
+
+      {/* Speech-to-Text (STT) Whisper Engine Configuration */}
+      <Card className="border border-border shadow-xs overflow-hidden rounded-2xl bg-card">
+        <div className="h-1 w-full bg-gradient-to-r from-violet-500/60 via-indigo-500/60 to-purple-500/60" />
+        <CardHeader className="bg-muted/20 border-b border-border/70 p-5">
+          <div className="flex items-center justify-between">
+            <div className="space-y-1">
+              <CardTitle className="text-base sm:text-lg font-bold flex items-center gap-2 text-foreground">
+                <Mic className="h-4 w-4 text-violet-600 dark:text-violet-400" />
+                Speech-to-Text (STT) Voice Dictation Engine
+              </CardTitle>
+              <CardDescription className="text-xs text-muted-foreground">
+                Configure your dedicated Whisper transcription engine for clinical voice notes and audio memos.
+              </CardDescription>
+            </div>
+            <span className="stamp-badge stamp-confirmed text-[9px] py-0.5 px-2 hidden sm:inline-flex">
+              {localSttProvider.toUpperCase()} • {localSttModel}
+            </span>
+          </div>
+        </CardHeader>
+
+        <CardContent className="p-5 sm:p-6 space-y-6">
+          {/* Quick STT Provider Presets */}
+          <div className="space-y-2.5">
+            <Label className="text-xs font-bold text-foreground">
+              Choose STT Provider Preset
+            </Label>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              {STT_PROVIDER_PRESETS.map((preset) => {
+                const isSelected = localSttProvider === preset.id;
+                return (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    onClick={() => handleApplySttPreset(preset)}
+                    className={`p-3 rounded-xl border text-left transition-all flex flex-col justify-between gap-1.5 ${
+                      isSelected
+                        ? 'bg-violet-500/10 border-violet-500 text-foreground ring-1 ring-violet-500/40 shadow-xs'
+                        : 'bg-background hover:bg-muted/40 border-border text-foreground'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between w-full">
+                      <div className="flex items-center gap-1.5 font-bold text-xs">
+                        {isSelected ? (
+                          <Check className="h-3.5 w-3.5 text-violet-600 dark:text-violet-400 shrink-0" />
+                        ) : (
+                          <Radio className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                        )}
+                        <span>{preset.name}</span>
+                      </div>
+                      {preset.tag && (
+                        <span className="text-[9px] font-mono px-1.5 py-0.5 rounded-full bg-violet-600 text-white font-semibold">
+                          {preset.tag}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-muted-foreground leading-relaxed">
+                      {preset.desc}
+                    </p>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* STT Base Endpoint URL (for Groq, OpenAI, or Custom) */}
+          {localSttProvider !== 'gemini' && (
+            <div className="space-y-1.5">
+              <Label htmlFor="stt-endpoint" className="text-xs font-bold text-foreground">
+                STT Base Endpoint URL (OpenAI-compatible)
+              </Label>
+              <Input
+                id="stt-endpoint"
+                type="url"
+                placeholder="https://api.groq.com/openai/v1 or https://api.openai.com/v1"
+                value={localSttEndpoint}
+                onChange={(e) => {
+                  setLocalSttEndpoint(e.target.value);
+                  setSttTestResult(null);
+                }}
+                className="font-mono text-xs rounded-xl"
+              />
+              <p className="text-[11px] text-muted-foreground">
+                The transcription engine automatically calls the <code className="font-mono bg-muted px-1 py-0.5 rounded text-[10px]">/audio/transcriptions</code> route on this endpoint.
+              </p>
+            </div>
+          )}
+
+          {/* STT Model Identifier */}
+          {localSttProvider !== 'gemini' && (
+            <div className="space-y-1.5">
+              <Label htmlFor="stt-model" className="text-xs font-bold text-foreground">
+                STT Model Identifier
+              </Label>
+              <Input
+                id="stt-model"
+                type="text"
+                placeholder="whisper-large-v3-turbo, whisper-large-v3, whisper-1"
+                value={localSttModel}
+                onChange={(e) => {
+                  setLocalSttModel(e.target.value);
+                  setSttTestResult(null);
+                }}
+                className="font-mono text-xs rounded-xl"
+              />
+              <div className="flex flex-wrap gap-1.5 pt-1">
+                <span className="text-[10px] text-muted-foreground self-center mr-1">Recommended Whisper Models:</span>
+                {STT_MODEL_PRESETS.map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => {
+                      setLocalSttModel(m);
+                      setSttTestResult(null);
+                    }}
+                    className={`text-[10px] px-2 py-0.5 rounded font-mono border transition-colors ${
+                      localSttModel === m
+                        ? 'bg-violet-500/15 border-violet-500 text-violet-700 dark:text-violet-300 font-bold'
+                        : 'bg-muted/60 border-border/60 hover:bg-muted text-muted-foreground'
+                    }`}
+                  >
+                    {m}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Dedicated STT API Key */}
+          {localSttProvider !== 'gemini' && (
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <Label htmlFor="stt-api-key" className="text-xs font-bold text-foreground">
+                  STT API Key (Groq / OpenAI)
+                </Label>
+                {localSttProvider === 'groq' && (
+                  <a
+                    href="https://console.groq.com/keys"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[11px] text-violet-600 dark:text-violet-400 hover:underline flex items-center gap-1"
+                  >
+                    <span>Get free Groq API Key</span>
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
+                )}
+              </div>
+              <div className="relative">
+                <Input
+                  id="stt-api-key"
+                  type={showSttKey ? 'text' : 'password'}
+                  placeholder="gsk_... or sk-... (leave empty if using server environment key)"
+                  value={localSttApiKey}
+                  onChange={(e) => {
+                    setLocalSttApiKey(e.target.value);
+                    setSttTestResult(null);
+                  }}
+                  className="pr-10 rounded-xl font-mono text-xs"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowSttKey(!showSttKey)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  title={showSttKey ? 'Hide key' : 'Show key'}
+                >
+                  {showSttKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                Optional if <code className="font-mono bg-muted px-1 py-0.5 rounded text-[10px]">GROQ_API_KEY</code> or <code className="font-mono bg-muted px-1 py-0.5 rounded text-[10px]">OPENAI_API_KEY</code> is set in your server environment.
+              </p>
+            </div>
+          )}
+
+          {localSttProvider === 'gemini' && (
+            <div className="p-3 rounded-xl bg-violet-500/10 border border-violet-500/20 text-xs text-foreground space-y-1">
+              <p className="font-bold flex items-center gap-1.5 text-violet-700 dark:text-violet-300">
+                <Sparkles className="h-3.5 w-3.5" />
+                Gemini Multimodal Audio Transcription
+              </p>
+              <p className="text-[11px] text-muted-foreground leading-relaxed">
+                Voice recordings will be sent to Google Gemini for transcription using your configured Gemini API key.
+              </p>
+            </div>
+          )}
+
+          {/* STT Test Connection & Diagnostics */}
+          <div className="pt-2 border-t border-border/60 space-y-3">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleTestStt}
+                disabled={isTestingStt}
+                className="gap-2 text-xs font-bold rounded-xl h-9 border-border hover:border-violet-500/40 shadow-2xs"
+              >
+                {isTestingStt ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-600 dark:text-violet-400" />
+                ) : (
+                  <Activity className="h-3.5 w-3.5 text-violet-600 dark:text-violet-400" />
+                )}
+                <span>Test STT (Whisper) Endpoint</span>
+              </Button>
+              <span className="text-[11px] text-muted-foreground font-mono">
+                {localSttProvider.toUpperCase()}: {localSttModel}
+              </span>
+            </div>
+
+            {/* STT Test Result Display */}
+            {sttTestResult && (
+              <div
+                className={`p-3.5 rounded-xl border flex items-start gap-3 transition-all ${
+                  sttTestResult.success
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-900 dark:text-emerald-300'
+                    : 'bg-red-500/10 border-red-500/30 text-red-900 dark:text-red-300'
+                }`}
+              >
+                {sttTestResult.success ? (
+                  <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                ) : (
+                  <AlertCircle className="h-4 w-4 text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
+                )}
+                <div className="space-y-0.5 flex-1 min-w-0 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-bold">
+                      {sttTestResult.success ? 'STT Engine Verified & Ready' : 'STT Engine Error'}
+                    </span>
+                    {sttTestResult.latencyMs && (
+                      <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-background/60 border border-border">
+                        {sttTestResult.latencyMs}ms
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] leading-relaxed break-words opacity-90">
+                    {sttTestResult.message}
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
         </CardContent>
       </Card>
 
