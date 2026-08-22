@@ -52,13 +52,18 @@ export function getBase64ByteSize(base64OrDataUrl: string): number {
 /**
  * Helper to load an image source into an HTMLImageElement with cleanup.
  */
+/**
+ * Helper to load an image source into an HTMLImageElement with cleanup.
+ * Removes crossOrigin='anonymous' for data/blob URIs to prevent canvas tainting/blank renders,
+ * and ensures image is fully decoded before returning.
+ */
 async function loadHtmlImage(input: File | Blob | string): Promise<{ img: HTMLImageElement; byteSize: number; cleanup?: () => void }> {
   let src = '';
   let byteSize = 0;
   let cleanup: (() => void) | undefined;
 
   if (typeof input === 'string') {
-    if (input.startsWith('data:') || input.startsWith('blob:') || input.startsWith('http')) {
+    if (input.startsWith('data:') || input.startsWith('blob:') || input.startsWith('http://') || input.startsWith('https://')) {
       src = input;
     } else {
       src = `data:image/jpeg;base64,${input}`;
@@ -66,16 +71,37 @@ async function loadHtmlImage(input: File | Blob | string): Promise<{ img: HTMLIm
     byteSize = getBase64ByteSize(src);
   } else if (input instanceof Blob || input instanceof File) {
     byteSize = input.size;
-    src = URL.createObjectURL(input);
-    cleanup = () => URL.revokeObjectURL(src);
+    // Use FileReader to get solid Data URI in memory
+    src = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(new Error('Failed to read file as data URI'));
+      reader.readAsDataURL(input);
+    });
   }
 
   const img = new Image();
-  img.crossOrigin = 'anonymous';
+  // Only set crossOrigin for external http(s) URLs. NEVER set on data: or blob: URIs
+  if (src.startsWith('http://') || src.startsWith('https://')) {
+    img.crossOrigin = 'anonymous';
+  }
 
   await new Promise<void>((resolve, reject) => {
-    img.onload = () => resolve();
-    img.onerror = () => reject(new Error('Failed to load image element'));
+    if (img.complete && img.naturalWidth > 0) {
+      resolve();
+      return;
+    }
+    img.onload = async () => {
+      try {
+        if ('decode' in img) {
+          await img.decode().catch(() => {});
+        }
+      } catch {
+        // ignore decode fallback
+      }
+      resolve();
+    };
+    img.onerror = () => reject(new Error('Failed to load image element into DOM'));
     img.src = src;
   });
 
@@ -85,6 +111,7 @@ async function loadHtmlImage(input: File | Blob | string): Promise<{ img: HTMLIm
 /**
  * Compresses an image (File, Blob, Data URI, or Base64) to a target size (default 50KB).
  * Uses iterative high-quality canvas resizing and JPEG quality optimization.
+ * Maintains minimum resolution and contrast so medical text remains 100% legible for AI.
  */
 export async function compressImageToTargetKb(
   input: File | Blob | string,
@@ -92,7 +119,7 @@ export async function compressImageToTargetKb(
 ): Promise<CompressionResult> {
   const targetKb = options.targetKb || 50;
   const targetBytes = targetKb * 1024;
-  const initialMaxDim = options.maxDimension || 1200;
+  const initialMaxDim = options.maxDimension || 1600;
 
   if (typeof window === 'undefined') {
     throw new Error('Image compression must run in browser.');
@@ -100,12 +127,15 @@ export async function compressImageToTargetKb(
 
   const { img, byteSize: originalSizeBytes, cleanup } = await loadHtmlImage(input);
 
-  const naturalWidth = img.naturalWidth || img.width;
-  const naturalHeight = img.naturalHeight || img.height;
+  const naturalWidth = img.naturalWidth || img.width || 800;
+  const naturalHeight = img.naturalHeight || img.height || 600;
+
+  // Preserve readable bounds (never shrink below 700px for text/medical reports)
+  const minReadableDim = Math.min(700, Math.min(naturalWidth, naturalHeight));
 
   // Iterative canvas scaling & quality compression loop
   let currentMaxDim = Math.min(initialMaxDim, Math.max(naturalWidth, naturalHeight));
-  let quality = 0.85;
+  let quality = 0.86;
   let bestDataUrl = '';
   let bestSizeBytes = Infinity;
   let bestWidth = naturalWidth;
@@ -134,6 +164,7 @@ export async function compressImageToTargetKb(
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
 
+    // Solid white background to prevent transparent JPEG blackening
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, width, height);
     ctx.drawImage(img, 0, 0, width, height);
@@ -141,32 +172,54 @@ export async function compressImageToTargetKb(
     const candidateDataUrl = canvas.toDataURL('image/jpeg', quality);
     const candidateBytes = getBase64ByteSize(candidateDataUrl);
 
-    bestDataUrl = candidateDataUrl;
-    bestSizeBytes = candidateBytes;
-    bestWidth = width;
-    bestHeight = height;
+    if (candidateDataUrl && candidateDataUrl.length > 100) {
+      bestDataUrl = candidateDataUrl;
+      bestSizeBytes = candidateBytes;
+      bestWidth = width;
+      bestHeight = height;
+    }
 
-    if (candidateBytes <= targetBytes * 1.05) {
+    if (candidateBytes <= targetBytes * 1.08) {
       break;
     }
 
-    if (quality > 0.6) {
-      quality -= 0.15;
-    } else if (currentMaxDim > 800) {
-      currentMaxDim = Math.round(currentMaxDim * 0.8);
-      quality = 0.7;
-    } else if (quality > 0.35) {
+    // Step-down tuning while safeguarding minimum visual sharpness
+    if (quality > 0.65) {
       quality -= 0.12;
-    } else if (currentMaxDim > 500) {
-      currentMaxDim = Math.round(currentMaxDim * 0.75);
-      quality = 0.5;
+    } else if (currentMaxDim > 1100 && currentMaxDim > minReadableDim) {
+      currentMaxDim = Math.max(minReadableDim, Math.round(currentMaxDim * 0.8));
+      quality = 0.75;
+    } else if (quality > 0.50) {
+      quality -= 0.08;
+    } else if (currentMaxDim > 800 && currentMaxDim > minReadableDim) {
+      currentMaxDim = Math.max(minReadableDim, Math.round(currentMaxDim * 0.85));
+      quality = 0.60;
     } else {
-      quality = Math.max(0.2, quality - 0.1);
-      currentMaxDim = Math.round(currentMaxDim * 0.85);
+      quality = Math.max(0.40, quality - 0.05);
+      break;
     }
   }
 
   if (cleanup) cleanup();
+
+  // If compression failed to produce a valid image, fallback to raw input if string
+  if (!bestDataUrl || bestDataUrl.length < 100) {
+    if (typeof input === 'string') {
+      const fbUrl = input.startsWith('data:') ? input : `data:image/jpeg;base64,${input}`;
+      return {
+        dataUrl: fbUrl,
+        base64: fbUrl.includes('base64,') ? fbUrl.split('base64,')[1] : fbUrl,
+        mimeType: 'image/jpeg',
+        sizeBytes: originalSizeBytes || 50000,
+        sizeKb: Math.round((originalSizeBytes || 50000) / 1024),
+        originalSizeBytes: originalSizeBytes || 50000,
+        originalSizeKb: Math.round((originalSizeBytes || 50000) / 1024),
+        reductionPercentage: 0,
+        width: naturalWidth,
+        height: naturalHeight,
+      };
+    }
+  }
 
   const base64 = bestDataUrl.includes('base64,')
     ? bestDataUrl.split('base64,')[1]
@@ -260,12 +313,25 @@ export async function stitchImagesIntoSinglePanel(
     }
   }
 
-  // Normalize cell dimensions
-  const baseCellWidth = 700;
-  const baseCellHeight = 900;
-  const gap = 12;
-  const headerHeight = addBadges ? 32 : 8;
-  const padding = 14;
+  // Normalize cell dimensions based on average aspect ratio of loaded images
+  let avgAspect = 1.25; // default portrait aspect ratio (height / width)
+  try {
+    const aspects = loadedItems.map((item) => {
+      const w = item.img.naturalWidth || item.img.width || 800;
+      const h = item.img.naturalHeight || item.img.height || 1000;
+      return h / Math.max(1, w);
+    });
+    avgAspect = aspects.reduce((a, b) => a + b, 0) / aspects.length;
+  } catch {
+    avgAspect = 1.25;
+  }
+
+  // Base cell size scaled for high-density document rendering
+  const baseCellWidth = avgAspect > 1 ? 800 : 1000;
+  const baseCellHeight = Math.round(baseCellWidth * Math.min(1.8, Math.max(0.6, avgAspect)));
+  const gap = 14;
+  const headerHeight = addBadges ? 34 : 8;
+  const padding = 16;
 
   // Calculate master canvas size
   const masterWidth = padding * 2 + cols * baseCellWidth + (cols - 1) * gap;
@@ -289,7 +355,7 @@ export async function stitchImagesIntoSinglePanel(
   mCtx.fillStyle = '#f8fafc';
   mCtx.fillRect(0, 0, masterWidth, masterHeight);
 
-  // Draw border outline
+  // Draw outer border outline
   mCtx.strokeStyle = '#cbd5e1';
   mCtx.lineWidth = 2;
   mCtx.strokeRect(2, 2, masterWidth - 4, masterHeight - 4);
@@ -302,43 +368,51 @@ export async function stitchImagesIntoSinglePanel(
     const cellX = padding + colIdx * (baseCellWidth + gap);
     const cellY = padding + rowIdx * (baseCellHeight + headerHeight + gap);
 
-    // Draw document panel background & shadow
+    // Draw document panel background & card border
     mCtx.fillStyle = '#ffffff';
+    mCtx.fillRect(cellX, cellY, baseCellWidth, baseCellHeight + headerHeight);
     mCtx.strokeStyle = '#e2e8f0';
     mCtx.lineWidth = 1.5;
-    mCtx.fillRect(cellX, cellY, baseCellWidth, baseCellHeight + headerHeight);
     mCtx.strokeRect(cellX, cellY, baseCellWidth, baseCellHeight + headerHeight);
 
     // Draw Page Badge / Header Banner
     if (addBadges) {
-      mCtx.fillStyle = '#1e293b';
-      mCtx.fillRect(cellX, cellY, baseCellWidth, 26);
+      mCtx.fillStyle = '#0f172a';
+      mCtx.fillRect(cellX, cellY, baseCellWidth, 28);
+
+      mCtx.fillStyle = '#38bdf8';
+      mCtx.fillRect(cellX, cellY + 26, baseCellWidth, 2);
 
       mCtx.fillStyle = '#ffffff';
-      mCtx.font = 'bold 13px ui-sans-serif, system-ui, sans-serif';
+      mCtx.font = 'bold 13px ui-sans-serif, system-ui, -apple-system, sans-serif';
       mCtx.textBaseline = 'middle';
-      mCtx.fillText(`DOCUMENT PAGE ${idx + 1} OF ${count}`, cellX + 10, cellY + 13);
+      mCtx.fillText(`PAGE ${idx + 1} OF ${count} — MEDICAL ATTACHMENT`, cellX + 12, cellY + 14);
     }
 
     const { img } = loadedItems[idx];
-    const nW = img.naturalWidth || img.width || 1;
-    const nH = img.naturalHeight || img.height || 1;
+    const nW = img.naturalWidth || img.width || 800;
+    const nH = img.naturalHeight || img.height || 600;
 
-    // Aspect ratio fit within cell
-    const targetW = baseCellWidth - 12;
-    const targetH = baseCellHeight - 12;
+    // Aspect ratio fit within cell preserving maximum legible area
+    const targetW = baseCellWidth - 16;
+    const targetH = baseCellHeight - 16;
 
     const scale = Math.min(targetW / nW, targetH / nH);
-    const renderW = Math.round(nW * scale);
-    const renderH = Math.round(nH * scale);
+    const renderW = Math.max(10, Math.round(nW * scale));
+    const renderH = Math.max(10, Math.round(nH * scale));
 
     const renderX = cellX + Math.round((baseCellWidth - renderW) / 2);
     const renderY = cellY + headerHeight + Math.round((baseCellHeight - renderH) / 2);
 
+    // Fill white background for inner document area
+    mCtx.fillStyle = '#ffffff';
+    mCtx.fillRect(renderX, renderY, renderW, renderH);
+
+    // Draw image safely onto canvas
     mCtx.drawImage(img, renderX, renderY, renderW, renderH);
 
-    // Subtle divider line under image
-    mCtx.strokeStyle = '#e2e8f0';
+    // Clean subtle boundary
+    mCtx.strokeStyle = '#cbd5e1';
     mCtx.lineWidth = 1;
     mCtx.strokeRect(renderX, renderY, renderW, renderH);
   }
@@ -346,13 +420,16 @@ export async function stitchImagesIntoSinglePanel(
   // Clean up loaded image blobs
   loadedItems.forEach((item) => item.cleanup?.());
 
-  // 4. Iterative scaling & compression to reach <= ~150KB
+  // 4. Iterative scaling & compression to reach <= ~150KB while preserving AI vision OCR legibility
   let currentMaxDim = Math.min(maxDimTarget, Math.max(masterWidth, masterHeight));
-  let quality = 0.82;
+  let quality = 0.85;
   let bestDataUrl = '';
   let bestSizeBytes = Infinity;
   let bestWidth = masterWidth;
   let bestHeight = masterHeight;
+
+  // Minimum readable dimension for stitched composite
+  const minCompositeDim = Math.min(1400, Math.max(masterWidth, masterHeight));
 
   for (let pass = 0; pass < 8; pass++) {
     let outW = masterWidth;
@@ -384,28 +461,27 @@ export async function stitchImagesIntoSinglePanel(
     const candidateDataUrl = outCanvas.toDataURL('image/jpeg', quality);
     const candidateBytes = getBase64ByteSize(candidateDataUrl);
 
-    bestDataUrl = candidateDataUrl;
-    bestSizeBytes = candidateBytes;
-    bestWidth = outW;
-    bestHeight = outH;
+    if (candidateDataUrl && candidateDataUrl.length > 100) {
+      bestDataUrl = candidateDataUrl;
+      bestSizeBytes = candidateBytes;
+      bestWidth = outW;
+      bestHeight = outH;
+    }
 
-    if (candidateBytes <= targetBytes * 1.05) {
+    if (candidateBytes <= targetBytes * 1.1) {
       break;
     }
 
-    if (quality > 0.6) {
-      quality -= 0.12;
-    } else if (currentMaxDim > 1400) {
-      currentMaxDim = Math.round(currentMaxDim * 0.8);
-      quality = 0.7;
-    } else if (quality > 0.35) {
-      quality -= 0.1;
-    } else if (currentMaxDim > 800) {
-      currentMaxDim = Math.round(currentMaxDim * 0.75);
-      quality = 0.55;
+    if (quality > 0.65) {
+      quality -= 0.10;
+    } else if (currentMaxDim > 1600 && currentMaxDim > minCompositeDim) {
+      currentMaxDim = Math.max(minCompositeDim, Math.round(currentMaxDim * 0.85));
+      quality = 0.75;
+    } else if (quality > 0.50) {
+      quality -= 0.08;
     } else {
-      quality = Math.max(0.2, quality - 0.08);
-      currentMaxDim = Math.round(currentMaxDim * 0.85);
+      quality = Math.max(0.40, quality - 0.05);
+      break;
     }
   }
 

@@ -331,19 +331,26 @@ export async function POST(req: NextRequest) {
 
     const genAI = new GoogleGenerativeAI(apiKey);
 
-    const parts: any[] = [prompt];
-    if (images && images.length > 0) {
-      for (const img of images) {
-        if (img.data) {
-          parts.push({
-            inlineData: {
-              data: img.data,
-              mimeType: img.mimeType || 'image/jpeg',
-            },
-          });
-        }
+    const validImages = images ? images.filter((img: any) => img && img.data && typeof img.data === 'string' && img.data.length > 50) : [];
+    const imageCount = validImages.filter((img: any) => img.mimeType?.startsWith('image/')).length;
+
+    let effectivePrompt = prompt;
+    if (imageCount > 0) {
+      effectivePrompt = `[CLINICAL ATTACHMENTS: ${imageCount} medical document/image page(s) attached. Thoroughly examine and extract all visible findings, lab test parameters, numerical values, reference ranges, patient demographics, and clinical text directly from the attached visual image(s) to formulate the comprehensive response.]\n\n${prompt}`;
+    }
+
+    const parts: any[] = [];
+    if (validImages.length > 0) {
+      for (const img of validImages) {
+        parts.push({
+          inlineData: {
+            data: img.data,
+            mimeType: img.mimeType || 'image/jpeg',
+          },
+        });
       }
     }
+    parts.push(effectivePrompt);
 
     let lastError: any = null;
 

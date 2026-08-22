@@ -86,20 +86,31 @@ async function optimizeImageForAiVision(dataUriOrBase64: string, mimeType: strin
     try {
         const src = dataUriOrBase64.startsWith('data:') ? dataUriOrBase64 : `data:${mimeType};base64,${dataUriOrBase64}`;
         const img = new Image();
-        img.crossOrigin = 'anonymous';
+        if (src.startsWith('http://') || src.startsWith('https://')) {
+            img.crossOrigin = 'anonymous';
+        }
 
         await new Promise<void>((resolve, reject) => {
-            img.onload = () => resolve();
+            if (img.complete && img.naturalWidth > 0) {
+                resolve();
+                return;
+            }
+            img.onload = async () => {
+                try {
+                    if ('decode' in img) await img.decode().catch(() => {});
+                } catch {}
+                resolve();
+            };
             img.onerror = () => reject(new Error('Image decode error'));
             img.src = src;
         });
 
-        const maxDim = 1600;
+        const maxDim = 2000;
         let width = img.naturalWidth || img.width;
         let height = img.naturalHeight || img.height;
 
-        // If image is already reasonably sized (<1600px and not HEIC/huge), keep it clean
-        if (width <= maxDim && height <= maxDim && mimeType !== 'image/heic') {
+        // If image is already reasonably sized (<2000px and not HEIC/huge), keep it clean directly!
+        if (width > 0 && width <= maxDim && height <= maxDim && mimeType !== 'image/heic') {
             const cleanData = dataUriOrBase64.includes('base64,') ? dataUriOrBase64.split('base64,')[1] : dataUriOrBase64;
             return { data: cleanData, mimeType: sanitizeMimeType(mimeType) };
         }
@@ -115,16 +126,18 @@ async function optimizeImageForAiVision(dataUriOrBase64: string, mimeType: strin
         }
 
         const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
+        canvas.width = Math.max(1, width);
+        canvas.height = Math.max(1, height);
         const ctx = canvas.getContext('2d');
         if (!ctx) {
             const cleanData = dataUriOrBase64.includes('base64,') ? dataUriOrBase64.split('base64,')[1] : dataUriOrBase64;
             return { data: cleanData, mimeType };
         }
 
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
         ctx.drawImage(img, 0, 0, width, height);
-        const optimizedDataUrl = canvas.toDataURL('image/jpeg', 0.88);
+        const optimizedDataUrl = canvas.toDataURL('image/jpeg', 0.90);
         const base64Data = optimizedDataUrl.split('base64,')[1];
         return { data: base64Data, mimeType: 'image/jpeg' };
     } catch (e) {
@@ -460,8 +473,16 @@ export async function executeAiPrompt(
     );
 
     const genAI = new GoogleGenerativeAI(apiKey);
-    const parts: any[] = [prompt];
-    for (const norm of normalizedImages) {
+    const validNormals = normalizedImages.filter((n) => n && n.data && n.data.length > 50);
+    const imageCount = validNormals.filter((n) => n.mimeType.startsWith('image/')).length;
+
+    let effectivePrompt = prompt;
+    if (imageCount > 0) {
+        effectivePrompt = `[CLINICAL ATTACHMENTS: ${imageCount} medical document/image page(s) attached. Thoroughly examine and extract all visible findings, lab test parameters, numerical values, reference ranges, patient demographics, and clinical text directly from the attached visual image(s) to formulate the comprehensive response.]\n\n${prompt}`;
+    }
+
+    const parts: any[] = [];
+    for (const norm of validNormals) {
         parts.push({
             inlineData: {
                 data: norm.data,
@@ -469,6 +490,7 @@ export async function executeAiPrompt(
             },
         });
     }
+    parts.push(effectivePrompt);
 
     let lastErr: any = null;
     for (const modelName of fallbackModels) {
