@@ -522,6 +522,125 @@ export async function executeAiPrompt(
     throw new Error(`AI Generation Error: ${rawErr}`);
 }
 
+export interface StreamChunkCallbackPayload {
+    text: string;
+    thinking?: string;
+    isDone: boolean;
+    modelUsed?: string;
+}
+
+/**
+ * Universal Streaming Prompt Executor that streams both thinking and generated text
+ * in real-time to components like Slide Generator, AI Diagnosis, and Clinical Inquiries.
+ */
+export async function executeStreamingAiPrompt(
+    configOrKey: string | AiConfig | undefined,
+    prompt: string,
+    images?: string[],
+    onChunk?: (payload: StreamChunkCallbackPayload) => void
+): Promise<{ text: string; thinking: string }> {
+    const config = resolveAiConfig(configOrKey);
+
+    // Normalize images
+    const normalizedImages: Array<{ data: string; mimeType: string }> = [];
+    if (images && images.length > 0) {
+        for (const img of images) {
+            const normalized = await normalizeMediaForGemini(img);
+            if (normalized && normalized.data) {
+                normalizedImages.push(normalized);
+            }
+        }
+    }
+
+    let accumulatedText = '';
+    let accumulatedThinking = '';
+
+    if (typeof window !== 'undefined') {
+        try {
+            const response = await fetch('/api/ai/generate/stream', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    prompt,
+                    images: normalizedImages,
+                    config,
+                }),
+            });
+
+            if (!response.ok || !response.body) {
+                const errJson = await response.json().catch(() => ({ error: `Stream failed with HTTP ${response.status}` }));
+                throw new Error(errJson.error || `Stream request failed (${response.status})`);
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (!trimmed || !trimmed.startsWith('data:')) continue;
+
+                    try {
+                        const jsonStr = trimmed.replace(/^data:\s*/, '');
+                        const parsed = JSON.parse(jsonStr);
+
+                        if (parsed.error) {
+                            throw new Error(parsed.error);
+                        }
+
+                        if (parsed.text) {
+                            accumulatedText += parsed.text;
+                        }
+                        if (parsed.thinking) {
+                            accumulatedThinking += parsed.thinking;
+                        }
+
+                        if (onChunk) {
+                            onChunk({
+                                text: accumulatedText,
+                                thinking: accumulatedThinking,
+                                isDone: !!parsed.done,
+                                modelUsed: parsed.modelUsed,
+                            });
+                        }
+                    } catch (parseErr) {
+                        // ignore minor partial SSE parse issues
+                    }
+                }
+            }
+
+            if (onChunk) {
+                onChunk({
+                    text: accumulatedText,
+                    thinking: accumulatedThinking,
+                    isDone: true,
+                });
+            }
+
+            if (accumulatedText.trim().length > 0) {
+                return { text: accumulatedText, thinking: accumulatedThinking };
+            }
+        } catch (streamErr: any) {
+            console.warn('Streaming API Route unavailable or encountered an error. Falling back to non-streaming execution...', streamErr);
+        }
+    }
+
+    // Fallback: non-streaming execution
+    const fallbackText = await executeAiPrompt(config, prompt, images);
+    if (onChunk) {
+        onChunk({ text: fallbackText, thinking: '', isDone: true });
+    }
+    return { text: fallbackText, thinking: '' };
+}
+
 /**
  * Robust JSON extraction helper handling codeblocks and bracket extraction across LLMs.
  */
@@ -652,6 +771,22 @@ export const ClientSideAiService = {
     },
 
     /**
+     * Helper to run prompt with streaming chunk support if callback provided, else standard prompt.
+     */
+    async _runPrompt(
+        apiKeyOrConfig: string | AiConfig,
+        prompt: string,
+        images?: string[],
+        onStreamChunk?: (payload: StreamChunkCallbackPayload) => void
+    ): Promise<string> {
+        if (onStreamChunk) {
+            const res = await executeStreamingAiPrompt(apiKeyOrConfig, prompt, images, onStreamChunk);
+            return res.text;
+        }
+        return executeAiPrompt(apiKeyOrConfig, prompt, images);
+    },
+
+    /**
      * Medical Report Knowledge & Parameter Breakdown Engine:
      * Parses uploaded lab reports, imaging, vitals, and notes to extract
      * all parameters with reference ranges, status flags, and deep
@@ -664,6 +799,7 @@ export const ClientSideAiService = {
         options?: {
             language?: TargetLanguage;
             audienceMode?: AudienceMode;
+            onStreamChunk?: (payload: StreamChunkCallbackPayload) => void;
         }
     ): Promise<ReportKnowledgeData> {
         const language = options?.language || 'english';
@@ -738,7 +874,7 @@ Return a single, strictly valid JSON object:
 ${patientData ? `\nPatient Notes & Data:\n${patientData}` : ''}
 `;
 
-        const text = await executeAiPrompt(apiKeyOrConfig, prompt, images);
+        const text = await this._runPrompt(apiKeyOrConfig, prompt, images, options?.onStreamChunk);
 
         const fallback: ReportKnowledgeData = {
             reportType: 'Clinical Diagnostic Report',
@@ -766,6 +902,7 @@ ${patientData ? `\nPatient Notes & Data:\n${patientData}` : ''}
         options?: {
             language?: TargetLanguage;
             audienceMode?: AudienceMode;
+            onStreamChunk?: (payload: StreamChunkCallbackPayload) => void;
         }
     ): Promise<{
         diagnoses: DiagnosisItem[];
@@ -887,7 +1024,7 @@ Return a single, strictly valid JSON object matching this structure:
 ${patientData ? `\nPatient Data & Clinical Notes:\n${patientData}` : ''}
 `;
 
-        const text = await executeAiPrompt(apiKeyOrConfig, prompt, images);
+        const text = await this._runPrompt(apiKeyOrConfig, prompt, images, options?.onStreamChunk);
 
         const fallback = {
             diagnoses: [
@@ -936,9 +1073,11 @@ ${patientData ? `\nPatient Data & Clinical Notes:\n${patientData}` : ''}
             originalAnswer?: string;
             diagnosesSummary?: string;
             userFollowUp: string;
+            images?: string[];
             conversationHistory?: Array<{ question: string; answer: string }>;
             language?: TargetLanguage;
             audienceMode?: AudienceMode;
+            onStreamChunk?: (payload: StreamChunkCallbackPayload) => void;
         }
     ): Promise<{
         answer: string;
@@ -972,7 +1111,7 @@ ${
 "${params.userFollowUp}"
 
 **Instructions:**
-1. Provide a comprehensive answer tailored to the specified audience and language.
+1. Provide a comprehensive answer tailored to the specified audience and language. If images, lab panels, or PDF documents are attached, examine them closely.
 2. If in Simplified mode, break down the answer from first principles with intuitive analogies. If in Doctor mode, provide deep academic and guideline-cited precision.
 3. Suggest 3 additional high-yield follow-up questions relevant to this thread.
 4. Output MUST be a valid JSON object:
@@ -983,7 +1122,7 @@ ${
 }
 `;
 
-        const text = await executeAiPrompt(apiKeyOrConfig, prompt);
+        const text = await this._runPrompt(apiKeyOrConfig, prompt, params.images, params.onStreamChunk);
 
         return parseAiJson(text, {
             answer: text,
@@ -1003,8 +1142,10 @@ ${
             slideContent: any;
             slideSummary?: string;
             userQuestion: string;
+            images?: string[];
             language?: TargetLanguage;
             audienceMode?: AudienceMode;
+            onStreamChunk?: (payload: StreamChunkCallbackPayload) => void;
         }
     ): Promise<{
         answer: string;
@@ -1030,7 +1171,7 @@ ${params.slideSummary ? `**Slide Summary:** ${params.slideSummary}` : ''}
 "${params.userQuestion}"
 
 **Instructions:**
-1. Provide a clear, engaging answer specific to this slide's domain in the chosen language and audience style.
+1. Provide a clear, engaging answer specific to this slide's domain in the chosen language and audience style. If images/documents are attached, analyze them in this context.
 2. If in Simplified mode, explain the core concept from first principles with vivid analogies. If in Doctor mode, connect concepts to clinical practice, pathophysiology, and board exam pearls.
 3. Output valid JSON:
 {
@@ -1043,7 +1184,7 @@ ${params.slideSummary ? `**Slide Summary:** ${params.slideSummary}` : ''}
 }
 `;
 
-        const text = await executeAiPrompt(apiKeyOrConfig, prompt);
+        const text = await this._runPrompt(apiKeyOrConfig, prompt, params.images, params.onStreamChunk);
 
         return parseAiJson(text, {
             answer: text,
@@ -1062,6 +1203,7 @@ ${params.slideSummary ? `**Slide Summary:** ${params.slideSummary}` : ''}
         options?: {
             language?: TargetLanguage;
             audienceMode?: AudienceMode;
+            onStreamChunk?: (payload: StreamChunkCallbackPayload) => void;
         }
     ) {
         const language = options?.language || 'english';
@@ -1083,7 +1225,7 @@ Answer the clinical inquiry or case presentation in detail according to the sele
 
         if (question) prompt += `\n\nQuestion: ${question}`;
 
-        const text = await executeAiPrompt(apiKeyOrConfig, prompt, images);
+        const text = await this._runPrompt(apiKeyOrConfig, prompt, images, options?.onStreamChunk);
 
         return parseAiJson(text, {
             answer: text,
@@ -1104,6 +1246,7 @@ Answer the clinical inquiry or case presentation in detail according to the sele
         options?: {
             language?: TargetLanguage;
             audienceMode?: AudienceMode;
+            onStreamChunk?: (payload: StreamChunkCallbackPayload) => void;
         }
     ) {
         const language = options?.language || 'english';
@@ -1115,7 +1258,7 @@ Summarize the following clinical question or patient data into a concise 1-2 sen
 `;
         if (question) prompt += `\n\nInput: ${question}`;
 
-        const text = await executeAiPrompt(apiKeyOrConfig, prompt, images);
+        const text = await this._runPrompt(apiKeyOrConfig, prompt, images, options?.onStreamChunk);
         return { summary: text.trim() };
     },
 
@@ -1131,6 +1274,7 @@ Summarize the following clinical question or patient data into a concise 1-2 sen
             topic?: string;
             language?: TargetLanguage;
             audienceMode?: AudienceMode;
+            onStreamChunk?: (payload: StreamChunkCallbackPayload) => void;
         }
     ) {
         const language = input.language || 'english';
@@ -1168,7 +1312,7 @@ Reasoning: ${input.reasoning}
 `;
         }
 
-        const text = await executeAiPrompt(apiKeyOrConfig, prompt);
+        const text = await this._runPrompt(apiKeyOrConfig, prompt, undefined, input.onStreamChunk);
 
         return parseAiJson(text, {
             outline: [
@@ -1196,6 +1340,7 @@ Reasoning: ${input.reasoning}
             caseSummaryForPresentation?: string;
             language?: TargetLanguage;
             audienceMode?: AudienceMode;
+            onStreamChunk?: (payload: StreamChunkCallbackPayload) => void;
         }
     ): Promise<Slide[]> {
         const language = input.language || 'english';
@@ -1240,7 +1385,7 @@ ${input.selectedTopics.map((t: string) => `- ${t}`).join('\n')}
 Produce ONLY the JSON array.
 `;
 
-        const text = await executeAiPrompt(apiKeyOrConfig, prompt);
+        const text = await this._runPrompt(apiKeyOrConfig, prompt, undefined, input.onStreamChunk);
 
         const fallback = input.selectedTopics.map((t: string) => ({
             title: t,

@@ -1,5 +1,7 @@
 'use client';
 
+import { convertPdfToImages, isPdfFile } from './pdf-to-images';
+
 export interface CompressionResult {
   dataUrl: string;
   base64: string;
@@ -16,15 +18,16 @@ export interface CompressionResult {
 
 export interface CompressionOptions {
   targetKb?: number; // target max size in kilobytes (default: 50KB)
-  maxDimension?: number; // max width/height in px (default: 1200px)
+  maxDimension?: number; // max width/height in px (default: 1600px)
   minQuality?: number; // min jpeg quality before downscaling further (default: 0.3)
 }
 
 export interface StitchOptions {
-  targetKb?: number; // target max size in kilobytes (default: 150KB)
+  targetKb?: number; // target max size in kilobytes (default: 200KB)
   layout?: 'side-by-side' | 'grid' | 'vertical' | 'auto';
   addBadges?: boolean; // Draw subtle "[Page 1]", "[Page 2]" label headers
-  maxDimension?: number; // max canvas dimension in px (default: 2000px)
+  maxDimension?: number; // max canvas dimension in px (default: 2400px)
+  qualityPreset?: 'compact' | 'balanced' | 'high' | 'ultra';
 }
 
 /**
@@ -49,9 +52,6 @@ export function getBase64ByteSize(base64OrDataUrl: string): number {
   return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
 }
 
-/**
- * Helper to load an image source into an HTMLImageElement with cleanup.
- */
 /**
  * Helper to load an image source into an HTMLImageElement with cleanup.
  * Removes crossOrigin='anonymous' for data/blob URIs to prevent canvas tainting/blank renders,
@@ -246,47 +246,80 @@ export async function compressImageToTargetKb(
 
 /**
  * Merges/stitches multiple images into a single side-by-side or grid multi-panel image,
- * and compresses the combined canvas down to a target size (default 150KB) for AI vision prompts.
+ * and compresses the combined canvas down to a target size (default 200KB) for AI vision prompts.
  */
 export async function stitchImagesIntoSinglePanel(
   images: (File | Blob | string)[],
   options: StitchOptions = {}
 ): Promise<CompressionResult> {
-  const targetKb = options.targetKb || 150;
+  const targetKb = options.targetKb || 200;
   const targetBytes = targetKb * 1024;
   const addBadges = options.addBadges !== false;
-  const maxDimTarget = options.maxDimension || 2200;
+  const maxDimTarget = options.maxDimension || (targetKb >= 350 ? 3000 : targetKb >= 250 ? 2500 : 2200);
 
   if (typeof window === 'undefined') {
     throw new Error('Image stitching must run in browser.');
   }
 
-  // Filter out audio inputs if any
-  const imageInputs = images.filter((item) => {
+  // 1. Unpack any PDF documents into individual page image items first
+  const normalizedInputs: (File | Blob | string)[] = [];
+  for (const item of images) {
     if (typeof item === 'string') {
-      return !item.startsWith('data:audio') && !item.includes('audio/');
+      if (item.startsWith('data:audio') || item.includes('audio/')) {
+        continue;
+      }
+      if (isPdfFile(item)) {
+        try {
+          // Convert base64 PDF to blob
+          const byteString = atob(item.split(',')[1]);
+          const ab = new ArrayBuffer(byteString.length);
+          const ia = new Uint8Array(ab);
+          for (let i = 0; i < byteString.length; i++) {
+            ia[i] = byteString.charCodeAt(i);
+          }
+          const pdfBlob = new Blob([ab], { type: 'application/pdf' });
+          const pdfFile = new File([pdfBlob], 'document.pdf', { type: 'application/pdf' });
+          const pages = await convertPdfToImages(pdfFile);
+          pages.forEach((p) => normalizedInputs.push(p.dataUrl));
+          continue;
+        } catch (pdfErr) {
+          console.warn('Could not unpack data URI PDF, skipping:', pdfErr);
+        }
+      }
+      normalizedInputs.push(item);
+    } else if (item instanceof File || item instanceof Blob) {
+      if (item.type.startsWith('audio/')) {
+        continue;
+      }
+      if (isPdfFile(item)) {
+        try {
+          const pdfFile = item instanceof File ? item : new File([item], 'document.pdf', { type: 'application/pdf' });
+          const pages = await convertPdfToImages(pdfFile);
+          pages.forEach((p) => normalizedInputs.push(p.dataUrl));
+          continue;
+        } catch (pdfErr) {
+          console.warn('Could not unpack File PDF, skipping:', pdfErr);
+        }
+      }
+      normalizedInputs.push(item);
     }
-    if (item instanceof File || item instanceof Blob) {
-      return !item.type.startsWith('audio/');
-    }
-    return true;
-  });
+  }
 
-  if (imageInputs.length === 0) {
-    throw new Error('No valid images provided for stitching.');
+  if (normalizedInputs.length === 0) {
+    throw new Error('No valid images or PDF pages found for stitching.');
   }
 
   // If only 1 image, simply compress to targetKb
-  if (imageInputs.length === 1) {
-    const singleResult = await compressImageToTargetKb(imageInputs[0], { targetKb });
+  if (normalizedInputs.length === 1) {
+    const singleResult = await compressImageToTargetKb(normalizedInputs[0], { targetKb });
     return { ...singleResult, imageCount: 1 };
   }
 
-  // 1. Load all images
-  const loadedItems = await Promise.all(imageInputs.map(loadHtmlImage));
+  // 2. Load all images
+  const loadedItems = await Promise.all(normalizedInputs.map(loadHtmlImage));
   const totalOriginalBytes = loadedItems.reduce((acc, curr) => acc + curr.byteSize, 0);
 
-  // 2. Determine Layout (side-by-side for 2, 2x2 grid for 3-4, multi-column grid for 5+)
+  // 3. Determine Layout (side-by-side for 2, 2x2 grid for 3-4, multi-column grid for 5+)
   const count = loadedItems.length;
   let cols = 2;
   let rows = 1;
@@ -327,17 +360,17 @@ export async function stitchImagesIntoSinglePanel(
   }
 
   // Base cell size scaled for high-density document rendering
-  const baseCellWidth = avgAspect > 1 ? 800 : 1000;
+  const baseCellWidth = avgAspect > 1 ? 900 : 1100;
   const baseCellHeight = Math.round(baseCellWidth * Math.min(1.8, Math.max(0.6, avgAspect)));
-  const gap = 14;
-  const headerHeight = addBadges ? 34 : 8;
-  const padding = 16;
+  const gap = 16;
+  const headerHeight = addBadges ? 36 : 8;
+  const padding = 18;
 
   // Calculate master canvas size
   const masterWidth = padding * 2 + cols * baseCellWidth + (cols - 1) * gap;
   const masterHeight = padding * 2 + rows * (baseCellHeight + headerHeight) + (rows - 1) * gap;
 
-  // 3. Render master high-resolution composition canvas
+  // 4. Render master high-resolution composition canvas
   const masterCanvas = document.createElement('canvas');
   masterCanvas.width = masterWidth;
   masterCanvas.height = masterHeight;
@@ -378,15 +411,15 @@ export async function stitchImagesIntoSinglePanel(
     // Draw Page Badge / Header Banner
     if (addBadges) {
       mCtx.fillStyle = '#0f172a';
-      mCtx.fillRect(cellX, cellY, baseCellWidth, 28);
+      mCtx.fillRect(cellX, cellY, baseCellWidth, 30);
 
-      mCtx.fillStyle = '#38bdf8';
-      mCtx.fillRect(cellX, cellY + 26, baseCellWidth, 2);
+      mCtx.fillStyle = '#0ea5e9';
+      mCtx.fillRect(cellX, cellY + 28, baseCellWidth, 2);
 
       mCtx.fillStyle = '#ffffff';
       mCtx.font = 'bold 13px ui-sans-serif, system-ui, -apple-system, sans-serif';
       mCtx.textBaseline = 'middle';
-      mCtx.fillText(`PAGE ${idx + 1} OF ${count} — MEDICAL ATTACHMENT`, cellX + 12, cellY + 14);
+      mCtx.fillText(`DOCUMENT PAGE ${idx + 1} OF ${count}`, cellX + 14, cellY + 15);
     }
 
     const { img } = loadedItems[idx];
@@ -394,8 +427,8 @@ export async function stitchImagesIntoSinglePanel(
     const nH = img.naturalHeight || img.height || 600;
 
     // Aspect ratio fit within cell preserving maximum legible area
-    const targetW = baseCellWidth - 16;
-    const targetH = baseCellHeight - 16;
+    const targetW = baseCellWidth - 20;
+    const targetH = baseCellHeight - 20;
 
     const scale = Math.min(targetW / nW, targetH / nH);
     const renderW = Math.max(10, Math.round(nW * scale));
@@ -420,18 +453,18 @@ export async function stitchImagesIntoSinglePanel(
   // Clean up loaded image blobs
   loadedItems.forEach((item) => item.cleanup?.());
 
-  // 4. Iterative scaling & compression to reach <= ~150KB while preserving AI vision OCR legibility
+  // 5. Iterative scaling & compression to reach user's chosen target KB while preserving sharp OCR legibility
   let currentMaxDim = Math.min(maxDimTarget, Math.max(masterWidth, masterHeight));
-  let quality = 0.85;
+  let quality = targetKb >= 300 ? 0.92 : targetKb >= 200 ? 0.88 : 0.82;
   let bestDataUrl = '';
   let bestSizeBytes = Infinity;
   let bestWidth = masterWidth;
   let bestHeight = masterHeight;
 
   // Minimum readable dimension for stitched composite
-  const minCompositeDim = Math.min(1400, Math.max(masterWidth, masterHeight));
+  const minCompositeDim = Math.min(1600, Math.max(masterWidth, masterHeight));
 
-  for (let pass = 0; pass < 8; pass++) {
+  for (let pass = 0; pass < 9; pass++) {
     let outW = masterWidth;
     let outH = masterHeight;
 
@@ -468,19 +501,19 @@ export async function stitchImagesIntoSinglePanel(
       bestHeight = outH;
     }
 
-    if (candidateBytes <= targetBytes * 1.1) {
+    if (candidateBytes <= targetBytes * 1.12) {
       break;
     }
 
-    if (quality > 0.65) {
-      quality -= 0.10;
-    } else if (currentMaxDim > 1600 && currentMaxDim > minCompositeDim) {
-      currentMaxDim = Math.max(minCompositeDim, Math.round(currentMaxDim * 0.85));
-      quality = 0.75;
-    } else if (quality > 0.50) {
+    if (quality > 0.70) {
       quality -= 0.08;
+    } else if (currentMaxDim > 1800 && currentMaxDim > minCompositeDim) {
+      currentMaxDim = Math.max(minCompositeDim, Math.round(currentMaxDim * 0.88));
+      quality = 0.80;
+    } else if (quality > 0.55) {
+      quality -= 0.06;
     } else {
-      quality = Math.max(0.40, quality - 0.05);
+      quality = Math.max(0.45, quality - 0.04);
       break;
     }
   }
@@ -518,8 +551,37 @@ export async function compressImagesForAi(
 ): Promise<string[]> {
   if (!images || images.length === 0) return [];
 
+  // Unpack any PDF items first
+  const normalized: (File | Blob | string)[] = [];
+  for (const img of images) {
+    if (typeof img === 'string' && isPdfFile(img)) {
+      try {
+        const byteString = atob(img.split(',')[1]);
+        const ab = new ArrayBuffer(byteString.length);
+        const ia = new Uint8Array(ab);
+        for (let i = 0; i < byteString.length; i++) ia[i] = byteString.charCodeAt(i);
+        const pdfBlob = new Blob([ab], { type: 'application/pdf' });
+        const pages = await convertPdfToImages(new File([pdfBlob], 'doc.pdf', { type: 'application/pdf' }));
+        pages.forEach((p) => normalized.push(p.dataUrl));
+        continue;
+      } catch (err) {
+        console.warn('PDF unpack failed in compressImagesForAi:', err);
+      }
+    } else if ((img instanceof File || img instanceof Blob) && isPdfFile(img)) {
+      try {
+        const pdfFile = img instanceof File ? img : new File([img], 'doc.pdf', { type: 'application/pdf' });
+        const pages = await convertPdfToImages(pdfFile);
+        pages.forEach((p) => normalized.push(p.dataUrl));
+        continue;
+      } catch (err) {
+        console.warn('PDF unpack failed in compressImagesForAi:', err);
+      }
+    }
+    normalized.push(img);
+  }
+
   const results = await Promise.all(
-    images.map(async (img) => {
+    normalized.map(async (img) => {
       // Audio or non-image items (like audio recorded webm) are kept as is
       if (typeof img === 'string' && (img.startsWith('data:audio') || img.includes('audio/'))) {
         return img;
@@ -552,37 +614,59 @@ export async function compressImagesForAi(
   return results;
 }
 
-/**
- * Master dispatcher: Prepares images for AI prompts based on compression & stitch settings.
- * If mergeIntoSingle is enabled and there are >= 2 images, it stitches them into 1 single ~150KB image.
- * Otherwise, it applies individual compression (~50KB) or returns originals.
- */
-export async function prepareImagesForAiPrompt(options: {
-  images: (File | Blob | string)[];
+export interface PrepareImagesOptions {
+  images?: (File | Blob | string)[];
   compressEnabled?: boolean;
   mergeIntoSingle?: boolean;
   targetKb?: number;
   mergeTargetKb?: number;
-}): Promise<{
+}
+
+/**
+ * Master dispatcher: Prepares images for AI prompts based on compression & stitch settings.
+ * Accepts either:
+ *  - prepareImagesForAiPrompt(imagesArray, options)
+ *  - prepareImagesForAiPrompt(optionsObject)
+ * If mergeIntoSingle is enabled and there are >= 2 images, it stitches them into 1 single image.
+ * Otherwise, it applies individual compression (~50KB) or returns originals.
+ */
+export async function prepareImagesForAiPrompt(
+  inputOrOptions: (File | Blob | string)[] | PrepareImagesOptions,
+  maybeOptions?: Omit<PrepareImagesOptions, 'images'>
+): Promise<{
   processedImages: string[];
   isMerged: boolean;
   imageCount: number;
   summaryText: string;
 }> {
-  const {
-    images,
-    compressEnabled = true,
-    mergeIntoSingle = false,
-    targetKb = 50,
-    mergeTargetKb = 150,
-  } = options;
+  let images: (File | Blob | string)[] = [];
+  let compressEnabled = true;
+  let mergeIntoSingle = false;
+  let targetKb = 50;
+  let mergeTargetKb = 200;
+
+  if (Array.isArray(inputOrOptions)) {
+    images = inputOrOptions;
+    if (maybeOptions) {
+      if (maybeOptions.compressEnabled !== undefined) compressEnabled = maybeOptions.compressEnabled;
+      if (maybeOptions.mergeIntoSingle !== undefined) mergeIntoSingle = maybeOptions.mergeIntoSingle;
+      if (maybeOptions.targetKb !== undefined) targetKb = maybeOptions.targetKb;
+      if (maybeOptions.mergeTargetKb !== undefined) mergeTargetKb = maybeOptions.mergeTargetKb;
+    }
+  } else if (inputOrOptions && typeof inputOrOptions === 'object') {
+    images = inputOrOptions.images || [];
+    if (inputOrOptions.compressEnabled !== undefined) compressEnabled = inputOrOptions.compressEnabled;
+    if (inputOrOptions.mergeIntoSingle !== undefined) mergeIntoSingle = inputOrOptions.mergeIntoSingle;
+    if (inputOrOptions.targetKb !== undefined) targetKb = inputOrOptions.targetKb;
+    if (inputOrOptions.mergeTargetKb !== undefined) mergeTargetKb = inputOrOptions.mergeTargetKb;
+  }
 
   if (!images || images.length === 0) {
     return { processedImages: [], isMerged: false, imageCount: 0, summaryText: '' };
   }
 
-  // Separate image vs audio items
-  const imageItems: (File | Blob | string)[] = [];
+  // 1. Separate audio from image/PDF items
+  const imageAndPdfItems: (File | Blob | string)[] = [];
   const audioDataUrls: string[] = [];
 
   for (const item of images) {
@@ -590,7 +674,7 @@ export async function prepareImagesForAiPrompt(options: {
       if (item.startsWith('data:audio') || item.includes('audio/')) {
         audioDataUrls.push(item);
       } else {
-        imageItems.push(item);
+        imageAndPdfItems.push(item);
       }
     } else if (item instanceof File || item instanceof Blob) {
       if (item.type.startsWith('audio/')) {
@@ -602,20 +686,47 @@ export async function prepareImagesForAiPrompt(options: {
         });
         audioDataUrls.push(audioUrl);
       } else {
-        imageItems.push(item);
+        imageAndPdfItems.push(item);
       }
     }
   }
 
+  // 2. Unpack any PDF pages so we have true image count
+  const unpackedImageItems: (File | Blob | string)[] = [];
+  for (const item of imageAndPdfItems) {
+    if (isPdfFile(item)) {
+      try {
+        let pdfFile: File;
+        if (typeof item === 'string') {
+          const byteString = atob(item.split(',')[1]);
+          const ab = new ArrayBuffer(byteString.length);
+          const ia = new Uint8Array(ab);
+          for (let i = 0; i < byteString.length; i++) ia[i] = byteString.charCodeAt(i);
+          pdfFile = new File([new Blob([ab], { type: 'application/pdf' })], 'doc.pdf', { type: 'application/pdf' });
+        } else {
+          pdfFile = item instanceof File ? item : new File([item], 'doc.pdf', { type: 'application/pdf' });
+        }
+        const pages = await convertPdfToImages(pdfFile);
+        pages.forEach((p) => unpackedImageItems.push(p.dataUrl));
+      } catch (err) {
+        console.warn('PDF unpack error, passing as is:', err);
+        unpackedImageItems.push(item);
+      }
+    } else {
+      unpackedImageItems.push(item);
+    }
+  }
+
   // Case A: User enabled "Merge all into 1 image" and we have >= 2 images
-  if (mergeIntoSingle && imageItems.length > 1) {
+  if (mergeIntoSingle && unpackedImageItems.length > 1) {
     try {
-      const stitched = await stitchImagesIntoSinglePanel(imageItems, { targetKb: mergeTargetKb });
+      const stitched = await stitchImagesIntoSinglePanel(unpackedImageItems, { targetKb: mergeTargetKb });
+      console.log(`[AI Image Prep] Stitched ${unpackedImageItems.length} pages into 1 panel (${stitched.sizeKb}KB, ${stitched.width}x${stitched.height}px)`);
       return {
         processedImages: [stitched.dataUrl, ...audioDataUrls],
         isMerged: true,
-        imageCount: imageItems.length,
-        summaryText: `Merged ${imageItems.length} pages into 1 composite panel (~${stitched.sizeKb}KB)`,
+        imageCount: unpackedImageItems.length,
+        summaryText: `Merged ${unpackedImageItems.length} pages into 1 composite panel (${stitched.sizeKb}KB, ${stitched.width}x${stitched.height}px)`,
       };
     } catch (err) {
       console.warn('Image stitching failed, falling back to individual compression:', err);
@@ -623,19 +734,20 @@ export async function prepareImagesForAiPrompt(options: {
   }
 
   // Case B: Individual compression (~50KB per page)
-  if (compressEnabled && imageItems.length > 0) {
-    const compressedImages = await compressImagesForAi(imageItems, targetKb);
+  if (compressEnabled && unpackedImageItems.length > 0) {
+    const compressedImages = await compressImagesForAi(unpackedImageItems, targetKb);
+    console.log(`[AI Image Prep] Compressed ${unpackedImageItems.length} images to ~${targetKb}KB each`);
     return {
       processedImages: [...compressedImages, ...audioDataUrls],
       isMerged: false,
-      imageCount: imageItems.length,
-      summaryText: `Optimized ${imageItems.length} image(s) to ~${targetKb}KB each`,
+      imageCount: unpackedImageItems.length,
+      summaryText: `Optimized ${unpackedImageItems.length} image(s) to ~${targetKb}KB each`,
     };
   }
 
   // Case C: Raw original images
   const rawUrls = await Promise.all(
-    imageItems.map((img) => {
+    unpackedImageItems.map((img) => {
       if (typeof img === 'string') return Promise.resolve(img);
       return new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
@@ -649,8 +761,8 @@ export async function prepareImagesForAiPrompt(options: {
   return {
     processedImages: [...rawUrls, ...audioDataUrls],
     isMerged: false,
-    imageCount: imageItems.length,
-    summaryText: `Sent ${imageItems.length} original image(s)`,
+    imageCount: unpackedImageItems.length,
+    summaryText: `Sent ${unpackedImageItems.length} document image(s) in original quality`,
   };
 }
 

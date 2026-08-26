@@ -9,6 +9,8 @@ import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/hooks/use-toast';
 import { DiagnosisCard } from '@/components/DiagnosisCard';
 import { ReportParameterAnalysis } from '@/components/ReportParameterAnalysis';
+import { ClinicalMarkdownRenderer } from '@/components/ClinicalMarkdownRenderer';
+import { ClinicalThinkingBox } from '@/components/ClinicalThinkingBox';
 import {
   FileText,
   Loader2,
@@ -87,6 +89,10 @@ function AiDiagnosisContent() {
   const [structuredQuestion, setStructuredQuestion] = useState<StructuredQuestion | null>(null);
   const [currentCaseId, setCurrentCaseId] = useState<string | null>(null);
   const [progressStep, setProgressStep] = useState(0);
+  const [streamingThought, setStreamingThought] = useState<string>('');
+  const [streamingText, setStreamingText] = useState<string>('');
+  const [streamingStatus, setStreamingStatus] = useState<string>('');
+  const [thinkingProcess, setThinkingProcess] = useState<string | undefined>(undefined);
   const loadedCaseIdRef = useRef<string | null>(null);
 
   const { toast } = useToast();
@@ -139,6 +145,7 @@ function AiDiagnosisContent() {
             setProactiveQuestions(caseData.outputData?.proactiveQuestions || []);
             setCaseSummaryForPresentation(caseData.outputData?.caseSummaryForPresentation || '');
             setFollowUpThreads(caseData.outputData?.followUpThreads || []);
+            setThinkingProcess(caseData.outputData?.thinkingProcess || undefined);
             setCurrentCaseId(caseId);
 
             if (caseData.outputData?.reportKnowledge && (!caseData.outputData?.diagnoses || caseData.outputData.diagnoses.length === 0)) {
@@ -421,6 +428,9 @@ function AiDiagnosisContent() {
     }
     setIsLoading(true);
     setErrorMessage(null);
+    setStreamingThought('');
+    setStreamingText('');
+    setStreamingStatus('Initiating clinical analysis...');
     try {
       // 1. Save original full-resolution files to local storage/history
       const imageUrls = await Promise.all(
@@ -436,18 +446,27 @@ function AiDiagnosisContent() {
         mergeTargetKb: mergeTargetKb || 150,
       });
 
-      // Single comprehensive clinical call with report knowledge extraction
+      // Single comprehensive clinical call with streaming callbacks & robust parsing
       const analysis = await ClientSideAiService.generateComprehensiveDiagnosis(
         aiConfig,
         patientData.trim() || undefined,
         imagesForAi,
-        { language, audienceMode }
+        {
+          language,
+          audienceMode,
+          callbacks: {
+            onThoughtChunk: (_chunk, fullThought) => setStreamingThought(fullThought),
+            onTextChunk: (_chunk, fullText) => setStreamingText(fullText),
+            onStatus: (msg) => setStreamingStatus(msg),
+          },
+        }
       );
 
       setResults(analysis.diagnoses);
       setClinicalAnswer(analysis.clinicalAnswer);
       setProactiveQuestions(analysis.proactiveQuestions);
       setCaseSummaryForPresentation(analysis.caseSummaryForPresentation);
+      setThinkingProcess(analysis.thinkingProcess);
       if (analysis.reportKnowledge) {
         setReportKnowledge(analysis.reportKnowledge);
       }
@@ -475,6 +494,7 @@ function AiDiagnosisContent() {
           proactiveQuestions: analysis.proactiveQuestions,
           caseSummaryForPresentation: analysis.caseSummaryForPresentation,
           followUpThreads: followUpThreads || [],
+          thinkingProcess: analysis.thinkingProcess,
         },
       };
 
@@ -491,6 +511,7 @@ function AiDiagnosisContent() {
       toast({ title: 'AI Diagnosis Error', description: msg, variant: 'destructive', duration: 9000 });
     } finally {
       setIsLoading(false);
+      setStreamingStatus('');
     }
   };
 
@@ -505,21 +526,25 @@ function AiDiagnosisContent() {
 
       const diagnosesSummary = results ? results.map((r) => `${r.diagnosis} (${Math.round(r.confidenceLevel * 100)}%)`).join(', ') : '';
 
-      const followUpRes = await ClientSideAiService.answerClinicalFollowUp(aiConfig, {
-        originalQuestion: patientData || structuredQuestion?.summary,
-        originalAnswer: clinicalAnswer?.answer,
-        diagnosesSummary,
-        userFollowUp: question,
-        conversationHistory,
-        language,
-        audienceMode,
-      });
+      const followUpRes = await ClientSideAiService.answerClinicalFollowUp(
+        aiConfig,
+        {
+          originalQuestion: patientData || structuredQuestion?.summary,
+          originalAnswer: clinicalAnswer?.answer,
+          diagnosesSummary,
+          userFollowUp: question,
+          conversationHistory,
+          language,
+          audienceMode,
+        }
+      );
 
       const newThread: FollowUpThread = {
         id: Date.now().toString(),
         question,
         answer: followUpRes.answer,
         reasoning: followUpRes.reasoning,
+        thinkingProcess: followUpRes.thinkingProcess,
         timestamp: Date.now(),
         source: 'diagnosis',
       };
@@ -589,6 +614,10 @@ function AiDiagnosisContent() {
     setFollowUpThreads([]);
     setStructuredQuestion(null);
     setCurrentCaseId(null);
+    setStreamingThought('');
+    setStreamingText('');
+    setStreamingStatus('');
+    setThinkingProcess(undefined);
     router.push('/ai-diagnosis');
   };
 
@@ -1021,6 +1050,38 @@ function AiDiagnosisContent() {
           {/* VIEW B: Differential Diagnoses & Clinical Synthesis */}
           {(activeOutputTab === 'diagnosis' || !reportKnowledge) && (
             <div className="space-y-6 w-full max-w-full">
+              {/* Active Streaming Reasoning & Output Preview */}
+              {isLoading && (
+                <div className="space-y-4">
+                  {streamingThought && (
+                    <ClinicalThinkingBox thought={streamingThought} isStreaming={true} className="shadow-xs" />
+                  )}
+                  {streamingText && (
+                    <Card className="border border-primary/30 bg-primary/5 shadow-xs overflow-hidden">
+                      <CardHeader className="p-3.5 sm:p-4 bg-primary/10 border-b border-primary/20 flex flex-row items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                          <span className="text-xs font-bold text-primary uppercase tracking-wider">
+                            Live Clinical Stream
+                          </span>
+                        </div>
+                        <span className="text-[10px] font-mono text-muted-foreground">
+                          {streamingStatus || 'Streaming diagnosis...'}
+                        </span>
+                      </CardHeader>
+                      <CardContent className="p-4 sm:p-5 max-h-[350px] overflow-y-auto">
+                        <ClinicalMarkdownRenderer content={streamingText} className="text-xs sm:text-sm" />
+                      </CardContent>
+                    </Card>
+                  )}
+                </div>
+              )}
+
+              {/* Completed Case Thinking Process */}
+              {!isLoading && thinkingProcess && (
+                <ClinicalThinkingBox thought={thinkingProcess} className="shadow-xs" />
+              )}
+
               {results && results.length > 0 && (
                 <div className="space-y-4 w-full max-w-full">
                   <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1120,9 +1181,9 @@ function AiDiagnosisContent() {
                     </div>
                   </CardHeader>
                   <CardContent className="p-4 sm:p-6 space-y-4 w-full max-w-full overflow-hidden">
-                    <div
-                      className="prose prose-sm max-w-none dark:prose-invert text-xs sm:text-sm leading-relaxed break-words overflow-x-auto font-sans"
-                      dangerouslySetInnerHTML={{ __html: formatText(clinicalAnswer.answer) }}
+                    <ClinicalMarkdownRenderer
+                      content={clinicalAnswer.answer}
+                      className="text-xs sm:text-sm leading-relaxed"
                     />
 
                     {clinicalAnswer.reasoning && (
@@ -1135,9 +1196,10 @@ function AiDiagnosisContent() {
                             </div>
                           </AccordionTrigger>
                           <AccordionContent>
-                            <div className="mt-2 rounded-xl border border-border bg-muted/40 p-3 sm:p-4 text-xs sm:text-sm leading-relaxed text-muted-foreground break-words overflow-x-auto font-sans">
-                              <div
-                                dangerouslySetInnerHTML={{ __html: formatText(clinicalAnswer.reasoning) }}
+                            <div className="mt-2 rounded-xl border border-border bg-muted/40 p-3 sm:p-4">
+                              <ClinicalMarkdownRenderer
+                                content={clinicalAnswer.reasoning}
+                                className="text-xs sm:text-sm text-muted-foreground leading-relaxed"
                               />
                             </div>
                           </AccordionContent>

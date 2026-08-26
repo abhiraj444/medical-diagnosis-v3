@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, ChangeEvent, ClipboardEvent, DragEvent } from 'react';
 import { Button } from './ui/button';
 import { Textarea } from './ui/textarea';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from './ui/card';
@@ -18,16 +18,23 @@ import {
   Stethoscope,
   PenLine,
   HelpCircle,
+  Paperclip,
+  Image as ImageIcon,
+  X,
+  FileText,
 } from 'lucide-react';
 import { VoiceInputButton } from './VoiceInputButton';
 import { SpeechSynthesisButton } from './SpeechSynthesisButton';
 import { useToast } from '@/hooks/use-toast';
+import { isPdfFile, convertPdfToImages } from '@/lib/pdf-to-images';
+import { prepareImagesForAiPrompt } from '@/lib/image-compressor';
+import { useSettings } from '@/context/SettingsContext';
 import type { FollowUpThread } from '@/types';
 
 interface FollowUpChatProps {
   proactiveQuestions?: string[];
   threads?: FollowUpThread[];
-  onAskFollowUp: (question: string) => Promise<void>;
+  onAskFollowUp: (question: string, images?: string[]) => Promise<void>;
   isLoading?: boolean;
   title?: string;
   description?: string;
@@ -41,24 +48,149 @@ export function FollowUpChat({
   onAskFollowUp,
   isLoading = false,
   title = 'Clinical Inquiries & Case Consultation',
-  description = 'Explore diagnostic blind spots, guideline updates, or ask custom clinical questions.',
+  description = 'Explore diagnostic blind spots, guideline updates, or ask custom clinical questions with attached documents.',
   sourceContext = 'diagnosis',
   slideTitle,
 }: FollowUpChatProps) {
   const [customQuestion, setCustomQuestion] = useState('');
+  const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
+  const [attachedPreviews, setAttachedPreviews] = useState<string[]>([]);
+  const [isProcessingFiles, setIsProcessingFiles] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
+  const { compressImagesForAi: compressEnabled, targetImageKb, mergeImagesIntoSingle, mergeTargetKb } = useSettings();
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [threads.length]);
 
+  const fileToDataUri = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const processIncomingFiles = async (files: File[]) => {
+    if (!files || files.length === 0) return;
+    setIsProcessingFiles(true);
+
+    try {
+      const newFiles: File[] = [];
+      const newPreviews: string[] = [];
+
+      for (const file of files) {
+        if (isPdfFile(file)) {
+          try {
+            const pages = await convertPdfToImages(file);
+            for (const page of pages) {
+              newFiles.push(page.file);
+              newPreviews.push(page.dataUrl);
+            }
+            toast({
+              title: 'PDF Unpacked',
+              description: `Unpacked "${file.name}" into ${pages.length} page image${pages.length > 1 ? 's' : ''}.`,
+            });
+          } catch (err) {
+            console.warn('PDF conversion in chat failed:', err);
+            newFiles.push(file);
+            newPreviews.push(URL.createObjectURL(file));
+          }
+        } else {
+          newFiles.push(file);
+          newPreviews.push(URL.createObjectURL(file));
+        }
+      }
+
+      setAttachedFiles((prev) => [...prev, ...newFiles]);
+      setAttachedPreviews((prev) => [...prev, ...newPreviews]);
+      toast({
+        title: 'Document Attached',
+        description: `Attached ${newFiles.length} file(s) to clinical question.`,
+      });
+    } catch (err: any) {
+      console.error('File attach error:', err);
+      toast({ title: 'Error', description: 'Could not process attached file.', variant: 'destructive' });
+    } finally {
+      setIsProcessingFiles(false);
+    }
+  };
+
+  const handleFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      await processIncomingFiles(Array.from(e.target.files));
+      e.target.value = '';
+    }
+  };
+
+  const handlePaste = async (e: ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData.items;
+    const pasted: File[] = [];
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].kind === 'file') {
+        const f = items[i].getAsFile();
+        if (f) pasted.push(f);
+      }
+    }
+    if (pasted.length > 0) {
+      await processIncomingFiles(pasted);
+    }
+  };
+
+  const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDragging(false);
+  };
+
+  const handleDrop = async (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDragging(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      await processIncomingFiles(Array.from(e.dataTransfer.files));
+    }
+  };
+
+  const removeFile = (idx: number) => {
+    setAttachedFiles((prev) => prev.filter((_, i) => i !== idx));
+    setAttachedPreviews((prev) => prev.filter((_, i) => i !== idx));
+  };
+
   const handleSend = async () => {
-    if (!customQuestion.trim() || isLoading) return;
-    const q = customQuestion.trim();
+    if ((!customQuestion.trim() && attachedFiles.length === 0) || isLoading) return;
+    const q = customQuestion.trim() || 'Please analyze the attached clinical document/image in relation to this case.';
     setCustomQuestion('');
-    await onAskFollowUp(q);
+
+    let processedUris: string[] = [];
+    if (attachedFiles.length > 0) {
+      try {
+        const rawUris = await Promise.all(attachedFiles.map(fileToDataUri));
+        const { processedImages } = await prepareImagesForAiPrompt({
+          images: rawUris,
+          compressEnabled,
+          targetKb,
+          mergeIntoSingle,
+          mergeTargetKb,
+        });
+        processedUris = processedImages;
+      } catch (err) {
+        console.warn('Image prep in FollowUpChat failed:', err);
+      }
+    }
+
+    setAttachedFiles([]);
+    setAttachedPreviews([]);
+    await onAskFollowUp(q, processedUris);
   };
 
   const handleChipClick = async (question: string) => {
@@ -109,7 +241,7 @@ export function FollowUpChat({
       </CardHeader>
 
       <CardContent className="p-4 sm:p-6 space-y-6">
-        {/* Proactive Clinical Question Chips (Journal Sticky Prompts) */}
+        {/* Proactive Clinical Question Chips */}
         {proactiveQuestions && proactiveQuestions.length > 0 && (
           <div className="space-y-2.5">
             <div className="flex items-center justify-between">
@@ -158,7 +290,7 @@ export function FollowUpChat({
                     <div className="p-1.5 rounded-lg bg-blue-500/10 border border-blue-500/20 text-blue-600 dark:text-blue-400 mt-0.5 shrink-0">
                       <User className="h-4 w-4" />
                     </div>
-                    <div className="flex-1 min-w-0">
+                    <div className="flex-1 min-w-0 space-y-2">
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-xs font-semibold text-muted-foreground">
                           {thread.slideTitle ? `Question on [${thread.slideTitle}]` : 'Doctor Inquiry'}
@@ -170,9 +302,27 @@ export function FollowUpChat({
                           })}
                         </span>
                       </div>
-                      <p className="text-sm sm:text-base font-bold text-foreground mt-0.5 font-sans">
+                      <p className="text-sm sm:text-base font-bold text-foreground font-sans">
                         {thread.question}
                       </p>
+
+                      {/* Render attached images if any */}
+                      {thread.images && thread.images.length > 0 && (
+                        <div className="flex flex-wrap gap-2 pt-1">
+                          {thread.images.map((imgSrc, imgIdx) => (
+                            <div
+                              key={imgIdx}
+                              className="relative rounded-lg overflow-hidden border border-border bg-muted/30 max-w-[120px] max-h-[90px]"
+                            >
+                              <img
+                                src={imgSrc}
+                                alt={`Attached doc ${imgIdx + 1}`}
+                                className="w-full h-full object-cover"
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -249,19 +399,62 @@ export function FollowUpChat({
                 Preceptor AI consulting clinical evidence &amp; guidelines...
               </p>
               <p className="text-[11px] text-muted-foreground">
-                Analyzing drug interactions, renal adjustments, and management algorithms
+                Analyzing drug interactions, renal adjustments, attached documents, and management algorithms
               </p>
             </div>
           </div>
         )}
 
-        {/* Input Bar with Voice Dictation */}
-        <div className="space-y-2 pt-1">
+        {/* Input Bar with File Attachment, Drag-Drop, and Voice Dictation */}
+        <div
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+          className={`space-y-2 pt-1 rounded-xl transition-all ${
+            isDragging ? 'ring-2 ring-primary bg-primary/5' : ''
+          }`}
+        >
+          {/* File Input */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept="image/*,application/pdf"
+            onChange={handleFileChange}
+            className="hidden"
+          />
+
+          {/* Attached Files Thumbnail Previews */}
+          {attachedPreviews.length > 0 && (
+            <div className="flex flex-wrap gap-2 p-2.5 rounded-xl bg-muted/40 border border-border">
+              {attachedPreviews.map((src, idx) => (
+                <div
+                  key={idx}
+                  className="relative group rounded-lg overflow-hidden border border-border bg-background w-16 h-16 flex items-center justify-center shrink-0 shadow-2xs"
+                >
+                  <img src={src} alt="Attached preview" className="w-full h-full object-cover" />
+                  <button
+                    type="button"
+                    onClick={() => removeFile(idx)}
+                    className="absolute top-1 right-1 p-0.5 rounded-full bg-slate-900/80 text-white hover:bg-destructive transition-colors"
+                    aria-label="Remove image"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              ))}
+              <span className="text-[11px] text-muted-foreground self-center pl-1 font-medium">
+                {attachedPreviews.length} attached document{attachedPreviews.length > 1 ? 's' : ''} ready to send with question
+              </span>
+            </div>
+          )}
+
           <div className="relative rounded-xl border border-border bg-background shadow-2xs focus-within:ring-2 focus-within:ring-primary/20 focus-within:border-primary transition-all">
             <Textarea
-              placeholder="Ask a custom follow-up (e.g. 2nd line therapy, dosing in renal failure, pediatric considerations)..."
+              placeholder="Ask a custom follow-up (e.g. 2nd line therapy, dosing in renal failure, pediatric considerations) or paste/drop lab images..."
               value={customQuestion}
               onChange={(e) => setCustomQuestion(e.target.value)}
+              onPaste={handlePaste}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
@@ -272,7 +465,24 @@ export function FollowUpChat({
               className="w-full resize-none border-0 bg-transparent p-3 text-xs sm:text-sm focus-visible:ring-0 focus-visible:outline-hidden placeholder:text-muted-foreground/70"
             />
             <div className="flex items-center justify-between p-2 pt-0 border-t border-border/40">
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isLoading || isProcessingFiles}
+                  className="h-8 w-8 text-muted-foreground hover:text-primary hover:bg-primary/10 rounded-lg"
+                  title="Attach image or PDF document"
+                  aria-label="Attach file"
+                >
+                  {isProcessingFiles ? (
+                    <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                  ) : (
+                    <Paperclip className="h-4 w-4" />
+                  )}
+                </Button>
+
                 <VoiceInputButton
                   onTranscript={(text) => {
                     setCustomQuestion((prev) => (prev ? `${prev} ${text}` : text));
@@ -281,15 +491,17 @@ export function FollowUpChat({
                   variant="ghost"
                   className="h-8 w-8 text-muted-foreground hover:text-primary hover:bg-primary/10"
                 />
-                <span className="text-[11px] font-handwriting text-muted-foreground hidden sm:inline text-xs">
-                  mic dictation enabled
+
+                <span className="text-[11px] font-handwriting text-muted-foreground hidden sm:inline text-xs pl-1">
+                  attach docs or paste images
                 </span>
               </div>
+
               <Button
                 type="button"
                 size="sm"
                 onClick={handleSend}
-                disabled={isLoading || !customQuestion.trim()}
+                disabled={isLoading || (!customQuestion.trim() && attachedFiles.length === 0)}
                 className="h-8 px-3 text-xs gap-1.5 shadow-2xs font-semibold"
               >
                 {isLoading ? (
@@ -306,4 +518,5 @@ export function FollowUpChat({
     </Card>
   );
 }
+
 

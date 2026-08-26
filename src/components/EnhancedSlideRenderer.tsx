@@ -22,6 +22,9 @@ import {
   CheckCircle2,
   PenLine,
   Maximize2,
+  Paperclip,
+  Image as ImageIcon,
+  X,
 } from 'lucide-react';
 import {
   Table,
@@ -46,6 +49,8 @@ import type { Slide, ContentItem } from '@/types';
 import { ClientSideAiService } from '@/lib/ClientSideAiService';
 import { useSettings } from '@/context/SettingsContext';
 import { useToast } from '@/hooks/use-toast';
+import { isPdfFile, convertPdfToImages } from '@/lib/pdf-to-images';
+import { prepareImagesForAiPrompt } from '@/lib/image-compressor';
 
 interface BoldRendererProps {
   text: string;
@@ -331,12 +336,104 @@ export const EnhancedSlideRenderer: React.FC<EnhancedSlideRendererProps> = ({
   const [slideQuestion, setSlideQuestion] = useState('');
   const [isAskingSlide, setIsAskingSlide] = useState(false);
   const [slideAnswers, setSlideAnswers] = useState<Array<{ q: string; a: string; reasoning?: string }>>([]);
+  const [streamLiveAnswer, setStreamLiveAnswer] = useState('');
+  const [streamLiveThinking, setStreamLiveThinking] = useState('');
+  const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
+  const [attachedPreviews, setAttachedPreviews] = useState<string[]>([]);
+  const [isProcessingFiles, setIsProcessingFiles] = useState(false);
+  const slideFileInputRef = React.useRef<HTMLInputElement>(null);
+
+  const fileToDataUri = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const processIncomingFiles = async (files: File[]) => {
+    if (!files || files.length === 0) return;
+    setIsProcessingFiles(true);
+    try {
+      const newFiles: File[] = [];
+      const newPreviews: string[] = [];
+
+      for (const file of files) {
+        if (isPdfFile(file)) {
+          try {
+            const pages = await convertPdfToImages(file);
+            for (const page of pages) {
+              newFiles.push(page.file);
+              newPreviews.push(page.dataUrl);
+            }
+            toast({
+              title: 'PDF Unpacked',
+              description: `Unpacked "${file.name}" into ${pages.length} page image${pages.length > 1 ? 's' : ''}.`,
+            });
+          } catch (err) {
+            console.warn('PDF unpack error in slide chat:', err);
+            newFiles.push(file);
+            newPreviews.push(URL.createObjectURL(file));
+          }
+        } else {
+          newFiles.push(file);
+          newPreviews.push(URL.createObjectURL(file));
+        }
+      }
+
+      setAttachedFiles((prev) => [...prev, ...newFiles]);
+      setAttachedPreviews((prev) => [...prev, ...newPreviews]);
+      toast({
+        title: 'Document Attached',
+        description: `Attached ${newFiles.length} file(s) for slide discussion.`,
+      });
+    } catch (err: any) {
+      console.error('File attach error:', err);
+      toast({ title: 'Error', description: 'Could not process attached file.', variant: 'destructive' });
+    } finally {
+      setIsProcessingFiles(false);
+    }
+  };
+
+  const handleSlideFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      await processIncomingFiles(Array.from(e.target.files));
+      e.target.value = '';
+    }
+  };
+
+  const removeAttachedFile = (idx: number) => {
+    setAttachedFiles((prev) => prev.filter((_, i) => i !== idx));
+    setAttachedPreviews((prev) => prev.filter((_, i) => i !== idx));
+  };
 
   const handleAskSlideQuestion = async (questionText?: string) => {
-    const q = (questionText || slideQuestion).trim();
+    const q = (questionText || slideQuestion).trim() || (attachedFiles.length > 0 ? 'Please analyze the attached image/document in the context of this slide.' : '');
     if (!q || !isConfigured || isAskingSlide) return;
 
     setIsAskingSlide(true);
+    setStreamLiveAnswer('');
+    setStreamLiveThinking('');
+    setShowSlideChat(true);
+
+    let processedUris: string[] = [];
+    if (attachedFiles.length > 0) {
+      try {
+        const rawUris = await Promise.all(attachedFiles.map(fileToDataUri));
+        const { processedImages } = await prepareImagesForAiPrompt({
+          images: rawUris,
+          compressEnabled: compressImagesForAi,
+          targetKb: targetImageKb,
+          mergeIntoSingle: mergeImagesIntoSingle,
+          mergeTargetKb: mergeTargetKb,
+        });
+        processedUris = processedImages;
+      } catch (err) {
+        console.warn('Image prep in slide chat failed:', err);
+      }
+    }
+
     try {
       const response = await ClientSideAiService.answerSlideFollowUp(aiConfig, {
         presentationTopic,
@@ -344,12 +441,21 @@ export const EnhancedSlideRenderer: React.FC<EnhancedSlideRendererProps> = ({
         slideContent: slide.content,
         slideSummary: slide.summary,
         userQuestion: q,
+        images: processedUris.length > 0 ? processedUris : undefined,
         language,
         audienceMode,
+        onStreamChunk: (payload) => {
+          if (payload.text) setStreamLiveAnswer(payload.text);
+          if (payload.thinking) setStreamLiveThinking(payload.thinking);
+        },
       });
 
       setSlideAnswers((prev) => [...prev, { q, a: response.answer, reasoning: response.reasoning }]);
       setSlideQuestion('');
+      setAttachedFiles([]);
+      setAttachedPreviews([]);
+      setStreamLiveAnswer('');
+      setStreamLiveThinking('');
       setShowSlideChat(true);
     } catch (e: any) {
       console.error('Slide Q&A error:', e);
@@ -604,16 +710,74 @@ export const EnhancedSlideRenderer: React.FC<EnhancedSlideRendererProps> = ({
                   </div>
                 ))}
 
+                {/* Active Streaming or Loading State */}
                 {isAskingSlide && (
-                  <div className="flex items-center gap-2 text-muted-foreground py-2">
-                    <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                    <span>Analyzing slide teaching context...</span>
+                  <div className="rounded-lg bg-card/80 p-3 space-y-2 border border-primary/40 shadow-2xs animate-in fade-in">
+                    <div className="flex items-center gap-2 text-primary text-xs font-semibold">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin text-primary shrink-0" />
+                      <span>Synthesizing Bedside Teaching Rationale...</span>
+                    </div>
+
+                    {streamLiveThinking && (
+                      <div className="text-[11px] text-muted-foreground italic font-mono bg-muted/50 p-2 rounded border border-border/50 max-h-24 overflow-y-auto leading-relaxed">
+                        <span className="font-sans font-semibold not-italic block mb-0.5 text-foreground/80">🧠 Thinking Process:</span>
+                        {streamLiveThinking}
+                      </div>
+                    )}
+
+                    {streamLiveAnswer && (
+                      <div className="text-foreground text-xs leading-relaxed border-l-2 border-primary pl-2.5 whitespace-pre-wrap">
+                        {streamLiveAnswer}
+                      </div>
+                    )}
                   </div>
                 )}
 
-                <div className="flex items-center gap-2 pt-1">
+                {/* Attached File Previews */}
+                {attachedPreviews.length > 0 && (
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    {attachedPreviews.map((preview, idx) => (
+                      <div key={idx} className="relative h-12 w-12 rounded-md overflow-hidden border border-border shadow-2xs">
+                        <img src={preview} alt={`Attached preview ${idx}`} className="h-full w-full object-cover" />
+                        <button
+                          type="button"
+                          onClick={() => removeAttachedFile(idx)}
+                          className="absolute top-0.5 right-0.5 bg-black/70 hover:bg-black text-white rounded-full p-0.5"
+                        >
+                          <X className="h-2.5 w-2.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Input Bar */}
+                <div className="flex items-center gap-1.5 pt-1">
+                  <input
+                    ref={slideFileInputRef}
+                    type="file"
+                    multiple
+                    accept="image/*,application/pdf"
+                    onChange={handleSlideFileChange}
+                    className="hidden"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => slideFileInputRef.current?.click()}
+                    disabled={isAskingSlide || isProcessingFiles}
+                    title="Attach ECG, Radiology, or Clinical PDF"
+                    className="h-8 w-8 p-0 shrink-0 text-muted-foreground hover:text-foreground border-border"
+                  >
+                    {isProcessingFiles ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                    ) : (
+                      <Paperclip className="h-3.5 w-3.5" />
+                    )}
+                  </Button>
                   <Input
-                    placeholder="Ask a specific question about this slide..."
+                    placeholder="Ask about this slide or attach clinical files..."
                     value={slideQuestion}
                     onChange={(e) => setSlideQuestion(e.target.value)}
                     onKeyDown={(e) => {
@@ -624,7 +788,7 @@ export const EnhancedSlideRenderer: React.FC<EnhancedSlideRendererProps> = ({
                   <Button
                     size="sm"
                     onClick={() => handleAskSlideQuestion()}
-                    disabled={isAskingSlide || !slideQuestion.trim()}
+                    disabled={isAskingSlide || (!slideQuestion.trim() && attachedFiles.length === 0)}
                     className="h-8 text-xs shrink-0 px-3 font-semibold"
                   >
                     Send

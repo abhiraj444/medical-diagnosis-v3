@@ -57,6 +57,7 @@ export interface FollowUpThread {
     question: string;
     answer: string;
     reasoning?: string;
+    thinkingProcess?: string;
     timestamp: number;
     source?: 'diagnosis' | 'slide';
     slideTitle?: string;
@@ -106,6 +107,7 @@ export interface ReportKnowledgeData {
 export interface ClinicalAnswerData {
     answer: string;
     reasoning?: string;
+    thinkingProcess?: string;
     topic?: string;
     keyTakeaways?: string[];
     proactiveQuestions?: string[];
@@ -133,6 +135,7 @@ export interface DiagnosisCase extends BaseCase {
         proactiveQuestions?: string[];
         caseSummaryForPresentation?: string;
         followUpThreads?: FollowUpThread[];
+        thinkingProcess?: string;
     };
 }
 
@@ -179,6 +182,7 @@ export interface AiConfig {
     customEndpoint?: string;
     customApiKey?: string;
     customModel?: string;
+    thinkingBudget?: number;
     sttConfig?: SttConfig;
 }
 

@@ -329,8 +329,6 @@ export async function POST(req: NextRequest) {
     const requestedModel = config.geminiModel || process.env.GEMINI_MODEL || 'gemini-3.7-flash';
     const modelsToTry = [requestedModel, ...GEMINI_FALLBACK_MODELS.filter((m) => m !== requestedModel)];
 
-    const genAI = new GoogleGenerativeAI(apiKey);
-
     const validImages = images ? images.filter((img: any) => img && img.data && typeof img.data === 'string' && img.data.length > 50) : [];
     const imageCount = validImages.filter((img: any) => img.mimeType?.startsWith('image/')).length;
 
@@ -339,10 +337,10 @@ export async function POST(req: NextRequest) {
       effectivePrompt = `[CLINICAL ATTACHMENTS: ${imageCount} medical document/image page(s) attached. Thoroughly examine and extract all visible findings, lab test parameters, numerical values, reference ranges, patient demographics, and clinical text directly from the attached visual image(s) to formulate the comprehensive response.]\n\n${prompt}`;
     }
 
-    const parts: any[] = [];
+    const contents: any[] = [];
     if (validImages.length > 0) {
       for (const img of validImages) {
-        parts.push({
+        contents.push({
           inlineData: {
             data: img.data,
             mimeType: img.mimeType || 'image/jpeg',
@@ -350,70 +348,70 @@ export async function POST(req: NextRequest) {
         });
       }
     }
-    parts.push(effectivePrompt);
+    contents.push({ text: effectivePrompt });
 
     let lastError: any = null;
 
     for (const modelName of modelsToTry) {
-      // Configure model with optional thinking budget for thinking models
-      const modelConfig: any = { model: modelName };
-      if (isThinkingModel(modelName)) {
-        modelConfig.generationConfig = {
-          thinkingConfig: {
-            thinkingBudget: 4096,
-          },
-        };
-      }
-
-      // Attempt with retry for 503 overloaded errors
-      const maxRetries = 2;
-      for (let attempt = 0; attempt < maxRetries; attempt++) {
-        try {
-          const model = genAI.getGenerativeModel(modelConfig);
-
-          // Use streaming to prevent Vercel/proxy timeout for long-running thinking models
-          const result = await model.generateContentStream(parts);
-
-          // Collect all streamed chunks into a single response
-          let responseText = '';
-          for await (const chunk of result.stream) {
-            const chunkText = chunk.text();
-            if (chunkText) {
-              responseText += chunkText;
-            }
+      try {
+        const ai = new GoogleGenAI({ apiKey });
+        const genConfig: any = {};
+        if (isThinkingModel(modelName)) {
+          const userBudget = config.thinkingBudget;
+          if (userBudget === 0) {
+            genConfig.thinkingConfig = { thinkingBudget: 0 };
+          } else if (typeof userBudget === 'number' && userBudget > 0) {
+            genConfig.thinkingConfig = { thinkingBudget: userBudget };
+          } else {
+            genConfig.thinkingConfig = { thinkingBudget: -1 };
           }
-
-          return NextResponse.json({ text: responseText, modelUsed: modelName });
-        } catch (err: any) {
-          lastError = err;
-          const errMsg = (err?.message || '').toLowerCase();
-
-          // On 503 overloaded, retry once with delay before trying next model
-          if (is503Overloaded(err) && attempt < maxRetries - 1) {
-            console.warn(`Model ${modelName} returned 503 (attempt ${attempt + 1}), retrying in 2s...`);
-            await sleep(2000);
-            continue;
-          }
-
-          // On 404/not found, try next model immediately
-          if (errMsg.includes('not found') || errMsg.includes('404') || errMsg.includes('unsupported model')) {
-            console.warn(`Model ${modelName} not found, attempting fallback model...`);
-            break; // break retry loop, continue model loop
-          }
-
-          // On 503 after retries exhausted, try next model
-          if (is503Overloaded(err)) {
-            console.warn(`Model ${modelName} still overloaded after retries, attempting fallback model...`);
-            break;
-          }
-
-          // For other errors (invalid API key, quota, etc.), fail immediately
-          const { message, statusCode } = parseGoogleErrorMessage(err);
-          return NextResponse.json(
-            { error: message, rawError: err?.message || String(err || '') },
-            { status: statusCode }
-          );
         }
+
+        const responseStream = await ai.models.generateContentStream({
+          model: modelName,
+          contents,
+          config: Object.keys(genConfig).length > 0 ? genConfig : undefined,
+        });
+
+        let fullText = '';
+        let fullThought = '';
+
+        for await (const chunk of responseStream) {
+          const candidate = chunk.candidates?.[0];
+          const parts = candidate?.content?.parts;
+
+          if (parts && parts.length > 0) {
+            for (const part of parts) {
+              if (part.thought) {
+                fullThought += part.text || '';
+              } else if (part.text) {
+                fullText += part.text;
+              }
+            }
+          } else if (chunk.text) {
+            fullText += chunk.text;
+          }
+        }
+
+        return NextResponse.json({
+          text: fullText,
+          thought: fullThought || undefined,
+          modelUsed: modelName,
+        });
+      } catch (err: any) {
+        lastError = err;
+        const errMsg = (err?.message || '').toLowerCase();
+
+        if (errMsg.includes('not found') || errMsg.includes('404') || errMsg.includes('unsupported model') || errMsg.includes('503')) {
+          console.warn(`Model ${modelName} encountered error, trying next fallback:`, errMsg);
+          continue;
+        }
+
+        const { message, statusCode } = parseGoogleErrorMessage(err);
+        return NextResponse.json(
+          { error: message, rawError: err?.message || String(err || '') },
+          { status: statusCode }
+        );
       }
     }
 

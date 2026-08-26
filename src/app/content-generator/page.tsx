@@ -43,6 +43,7 @@ import type { RecordedAudio } from '@/hooks/useAudioRecorder';
 import { convertPdfToImages, isPdfFile } from '@/lib/pdf-to-images';
 import { compressImagesForAi, prepareImagesForAiPrompt } from '@/lib/image-compressor';
 import { ImageCompressionOption } from '@/components/ImageCompressionOption';
+import { ClinicalThinkingBox } from '@/components/ClinicalThinkingBox';
 import Link from 'next/link';
 
 function ContentGeneratorContent() {
@@ -55,6 +56,13 @@ function ContentGeneratorContent() {
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [isAskingFollowUp, setIsAskingFollowUp] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Streaming & Thinking process states
+  const [streamThinking, setStreamThinking] = useState<string>('');
+  const [streamText, setStreamText] = useState<string>('');
+  const [streamStep, setStreamStep] = useState<string>('');
+  const [activeStepIndex, setActiveStepIndex] = useState<number>(0);
+  const [streamModelName, setStreamModelName] = useState<string>('Gemini 3.7 Flash');
 
   const [result, setResult] = useState<any | null>(null);
   const [proactiveQuestions, setProactiveQuestions] = useState<string[]>([]);
@@ -357,6 +365,13 @@ function ContentGeneratorContent() {
     });
   };
 
+  const handleStreamChunk = (payload: { thinking?: string; text?: string; step?: string; model?: string }) => {
+    if (payload.thinking) setStreamThinking(payload.thinking);
+    if (payload.text) setStreamText(payload.text);
+    if (payload.step) setStreamStep(payload.step);
+    if (payload.model) setStreamModelName(payload.model);
+  };
+
   const handleQuestionSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!user) return;
@@ -372,6 +387,11 @@ function ContentGeneratorContent() {
     }
     setIsLoading(true);
     setErrorMessage(null);
+    setStreamThinking('');
+    setStreamText('');
+    setStreamStep('Analyzing clinical inquiry & attached documents...');
+    setActiveStepIndex(0);
+
     try {
       // 1. Save original full-resolution files to local storage/history
       const imageUrls = await Promise.all(
@@ -388,8 +408,15 @@ function ContentGeneratorContent() {
       });
 
       const [response, summaryResponse] = await Promise.all([
-        ClientSideAiService.answerClinicalQuestion(aiConfig, question.trim() || undefined, imagesForAi, { language, audienceMode }),
-        ClientSideAiService.summarizeQuestion(aiConfig, question.trim() || undefined, imagesForAi, { language, audienceMode }),
+        ClientSideAiService.answerClinicalQuestion(aiConfig, question.trim() || undefined, imagesForAi, {
+          language,
+          audienceMode,
+          onStreamChunk: handleStreamChunk,
+        }),
+        ClientSideAiService.summarizeQuestion(aiConfig, question.trim() || undefined, imagesForAi, {
+          language,
+          audienceMode,
+        }),
       ]);
 
       setResult(response);
@@ -450,11 +477,17 @@ function ContentGeneratorContent() {
     }
     setIsLoading(true);
     setErrorMessage(null);
+    setStreamThinking('');
+    setStreamText('');
+    setStreamStep('Generating postgraduate presentation outline...');
+    setActiveStepIndex(0);
+
     try {
       const data = await ClientSideAiService.generatePresentationOutline(aiConfig, {
         topic: topic.trim(),
         language,
         audienceMode,
+        onStreamChunk: handleStreamChunk,
       });
       setPresentationOutline(data.outline);
       setSelectedTopics(data.outline);
@@ -502,6 +535,11 @@ function ContentGeneratorContent() {
     if (!user || !isConfigured) return;
     setIsLoading(true);
     setErrorMessage(null);
+    setStreamThinking('');
+    setStreamText('');
+    setStreamStep('Building presentation outline from clinical analysis...');
+    setActiveStepIndex(1);
+
     try {
       const data = await ClientSideAiService.generatePresentationOutline(aiConfig, {
         question: question,
@@ -510,6 +548,7 @@ function ContentGeneratorContent() {
         topic: result?.topic || topic,
         language,
         audienceMode,
+        onStreamChunk: handleStreamChunk,
       });
       setPresentationOutline(data.outline);
       setSelectedTopics(data.outline);
@@ -542,6 +581,11 @@ function ContentGeneratorContent() {
     if (!user || !isConfigured || selectedTopics.length === 0) return;
     setIsLoading(true);
     setErrorMessage(null);
+    setStreamThinking('');
+    setStreamText('');
+    setStreamStep('Synthesizing structured multi-slide presentation with clinical pearls & tables...');
+    setActiveStepIndex(2);
+
     try {
       const placeholders = selectedTopics.map((t) => ({ title: t, content: [] }));
       setSlides(placeholders);
@@ -554,6 +598,7 @@ function ContentGeneratorContent() {
         caseSummaryForPresentation: question,
         language,
         audienceMode,
+        onStreamChunk: handleStreamChunk,
       });
 
       setSlides(generatedSlides);
@@ -585,7 +630,7 @@ function ContentGeneratorContent() {
     }
   };
 
-  const handleAskFollowUp = async (q: string) => {
+  const handleAskFollowUp = async (q: string, images?: string[]) => {
     if (!isConfigured || isAskingFollowUp || !user) return;
     setIsAskingFollowUp(true);
     try {
@@ -599,6 +644,7 @@ function ContentGeneratorContent() {
         originalAnswer: result?.answer,
         diagnosesSummary: result?.topic,
         userFollowUp: q,
+        images,
         conversationHistory,
         language,
         audienceMode,
@@ -990,13 +1036,18 @@ function ContentGeneratorContent() {
         </Card>
       )}
 
-      {/* Loading State */}
+      {/* Loading State with Real-Time Thinking & Streaming Process */}
       {isLoading && !result && !slides && (
-        <div className="flex flex-col items-center justify-center py-16 space-y-3">
-          <Loader2 className="h-10 w-10 animate-spin text-primary" />
-          <p className="text-sm font-medium text-muted-foreground">
-            Consultant AI analyzing clinical guidelines & generating content...
-          </p>
+        <div className="space-y-4 py-2">
+          <ClinicalThinkingBox
+            isLoading={true}
+            thinkingText={streamThinking}
+            streamText={streamText}
+            currentStep={streamStep || 'Consultant AI analyzing clinical guidelines & generating content...'}
+            activeStepIndex={activeStepIndex}
+            modelName={streamModelName}
+            title="Clinical AI Live Reasoning & Evidence Synthesis"
+          />
         </div>
       )}
 
@@ -1041,12 +1092,18 @@ function ContentGeneratorContent() {
                 </Button>
               )}
 
-              {/* Skeleton loading for outline */}
-              {isLoading && !presentationOutline && (
-                <div className="space-y-2 pt-2">
-                  <Skeleton className="h-4 w-full" />
-                  <Skeleton className="h-4 w-4/5" />
-                  <Skeleton className="h-4 w-3/5" />
+              {/* Live Streaming & Thinking for Outline or Slide Generation */}
+              {isLoading && result && (
+                <div className="pt-2">
+                  <ClinicalThinkingBox
+                    isLoading={true}
+                    thinkingText={streamThinking}
+                    streamText={streamText}
+                    currentStep={streamStep || 'Synthesizing postgraduate slides & structured evidence...'}
+                    activeStepIndex={activeStepIndex}
+                    modelName={streamModelName}
+                    title="Slide Synthesis & Medical Reasoning"
+                  />
                 </div>
               )}
 
