@@ -6,13 +6,10 @@ export const maxDuration = 300;
 
 const GEMINI_FALLBACK_MODELS = [
   'gemini-3.6-flash',
-  'gemini-2.5-flash',
   'gemini-3.7-flash',
   'gemini-3.1-flash-lite',
-  'gemini-1.5-flash',
-  'gemini-2.0-flash',
 ];
-const THINKING_MODELS = ['gemini-3.7-flash', 'gemini-3.1-pro-preview', 'gemini-2.5-flash'];
+const THINKING_MODELS = ['gemini-3.7-flash', 'gemini-3.1-pro-preview' ];
 
 function isThinkingModel(modelName: string): boolean {
   return THINKING_MODELS.some((m) => modelName.toLowerCase().includes(m));
