@@ -468,9 +468,15 @@ export async function executeAiPrompt(
     }
 
     const requestedModel = config.geminiModel || DEFAULT_GEMINI_MODEL;
-    const fallbackModels = [requestedModel, 'gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash'].filter(
-        (v, i, a) => a.indexOf(v) === i
-    );
+    const fallbackModels = [
+        requestedModel,
+        'gemini-3.6-flash',
+        'gemini-2.5-flash',
+        'gemini-3.7-flash',
+        'gemini-3.1-flash-lite',
+        'gemini-1.5-flash',
+        'gemini-2.0-flash',
+    ].filter((v, i, a) => a.indexOf(v) === i);
 
     const genAI = new GoogleGenerativeAI(apiKey);
     const validNormals = normalizedImages.filter((n) => n && n.data && n.data.length > 50);
@@ -497,15 +503,14 @@ export async function executeAiPrompt(
         try {
             const model = genAI.getGenerativeModel({ model: modelName });
             const result = await model.generateContent(parts);
-            return result.response.text();
+            const text = result.response.text();
+            if (text && text.trim().length > 0) {
+                return text;
+            }
         } catch (err: any) {
             lastErr = err;
-            const msg = (err?.message || '').toLowerCase();
-            if (msg.includes('not found') || msg.includes('404') || msg.includes('unsupported model')) {
-                console.warn(`Model ${modelName} not found, attempting next fallback...`);
-                continue;
-            }
-            break;
+            console.warn(`Direct model ${modelName} encountered error, attempting next fallback...`, err?.message);
+            continue;
         }
     }
 

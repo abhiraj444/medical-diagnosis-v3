@@ -31,6 +31,7 @@ import {
   Radio,
   FileAudio,
   Check,
+  BrainCircuit,
 } from 'lucide-react';
 
 import { ModeLanguageSelector } from '@/components/ModeLanguageSelector';
@@ -39,8 +40,14 @@ const GEMINI_MODEL_PRESETS = [
   {
     id: 'gemini-3.7-flash',
     label: 'gemini-3.7-flash',
-    tag: 'Latest & Recommended',
-    desc: 'Cutting-edge reasoning, fast response times, high clinical accuracy.',
+    tag: 'Latest Reasoning',
+    desc: 'Cutting-edge reasoning and clinical accuracy with automatic backend fallback to 3.6/2.5 flash.',
+  },
+  {
+    id: 'gemini-3.6-flash',
+    label: 'gemini-3.6-flash',
+    tag: 'Ultra-Stable & Fast',
+    desc: 'Highly reliable flash model for direct, uninterrupted medical and slide analysis.',
   },
   {
     id: 'gemini-3.1-pro-preview',
@@ -57,8 +64,8 @@ const GEMINI_MODEL_PRESETS = [
   {
     id: 'gemini-2.5-flash',
     label: 'gemini-2.5-flash',
-    tag: 'Stable Legacy',
-    desc: 'Previous generation standard flash model.',
+    tag: 'Standard Flash',
+    desc: 'Stable general flash generation model.',
   },
 ];
 
@@ -180,6 +187,10 @@ export default function SettingsPage() {
     setMergeImagesIntoSingle,
     mergeTargetKb,
     setMergeTargetKb,
+    enableStreamingOutput,
+    setEnableStreamingOutput,
+    enableLiveThinking,
+    setEnableLiveThinking,
   } = useSettings();
 
   // Local form state
@@ -202,6 +213,10 @@ export default function SettingsPage() {
   const [localTargetKb, setLocalTargetKb] = useState<number>(targetImageKb || 50);
   const [localMergeImages, setLocalMergeImages] = useState<boolean>(mergeImagesIntoSingle);
   const [localMergeTargetKb, setLocalMergeTargetKb] = useState<number>(mergeTargetKb || 150);
+
+  // Feature Flags Local State
+  const [localStreamingOutput, setLocalStreamingOutput] = useState<boolean>(enableStreamingOutput);
+  const [localLiveThinking, setLocalLiveThinking] = useState<boolean>(enableLiveThinking);
 
   const [showGeminiKey, setShowGeminiKey] = useState(false);
   const [showCustomKey, setShowCustomKey] = useState(false);
@@ -364,13 +379,16 @@ export default function SettingsPage() {
     setMergeImagesIntoSingle(localMergeImages);
     setMergeTargetKb(localMergeTargetKb);
 
+    setEnableStreamingOutput(localStreamingOutput);
+    setEnableLiveThinking(localLiveThinking);
+
     toast({
       title: 'Settings Saved',
       description: `Active AI: ${provider === 'gemini' ? 'Google Gemini' : 'Custom LLM'} (${
         provider === 'gemini' ? localGeminiModel || DEFAULT_GEMINI_MODEL : localCustomModel
-      }) • STT: ${localSttProvider.toUpperCase()} (${localSttModel || DEFAULT_STT_MODEL}) • Image Optimization: ${
-        localCompressImages ? `~${localTargetKb}KB/img` : 'Off'
-      }${localMergeImages ? ` + Merge Single-Panel (~${localMergeTargetKb}KB)` : ''}`,
+      }) • STT: ${localSttProvider.toUpperCase()} (${localSttModel || DEFAULT_STT_MODEL}) • Flags: Streaming (${
+        localStreamingOutput ? 'On' : 'Off'
+      }), Thinking (${localLiveThinking ? 'On' : 'Off'})`,
     });
     router.back();
   };
@@ -391,12 +409,16 @@ export default function SettingsPage() {
     setLocalTargetKb(50);
     setLocalMergeImages(false);
     setLocalMergeTargetKb(150);
+
+    setLocalStreamingOutput(false);
+    setLocalLiveThinking(false);
+
     setTestResult(null);
     setSttTestResult(null);
 
     toast({
       title: 'Reset to Defaults',
-      description: `Gemini (${DEFAULT_GEMINI_MODEL}), STT Whisper (${DEFAULT_STT_MODEL}), and token optimization restored.`,
+      description: `Gemini (${DEFAULT_GEMINI_MODEL}), STT Whisper (${DEFAULT_STT_MODEL}), token optimization, and feature flags restored.`,
     });
   };
 
@@ -569,6 +591,94 @@ export default function SettingsPage() {
             </p>
             <p>
               Regardless of your AI prompt compression or single-image stitching settings, <strong>all uploaded files and multi-page documents are stored in full original resolution</strong> in your local Dexie database and Case History.
+            </p>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Feature Flags: Live Streaming & AI Thinking Display */}
+      <Card className="border border-border shadow-xs overflow-hidden rounded-2xl bg-card">
+        <div className="h-1 w-full bg-gradient-to-r from-cyan-500/60 via-blue-500/60 to-indigo-500/60" />
+        <CardHeader className="bg-muted/20 border-b border-border/70 p-5">
+          <div className="flex items-center justify-between">
+            <div className="space-y-1">
+              <CardTitle className="text-base sm:text-lg font-bold flex items-center gap-2 text-foreground">
+                <BrainCircuit className="h-4 w-4 text-cyan-600 dark:text-cyan-400" />
+                Feature Flags &amp; Live AI Display
+              </CardTitle>
+              <CardDescription className="text-xs text-muted-foreground">
+                Control experimental live token streaming and real-time internal scratchpad / thinking outputs.
+              </CardDescription>
+            </div>
+            <span className="stamp-badge stamp-inquiry text-[9px] py-0.5 px-2">
+              FEATURE FLAGS
+            </span>
+          </div>
+        </CardHeader>
+
+        <CardContent className="p-5 sm:p-6 space-y-5">
+          {/* Flag 1: Live Text Streaming */}
+          <div className="flex items-center justify-between gap-4 p-3.5 rounded-xl border bg-muted/30 border-border/70">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <Label htmlFor="settings-stream-toggle" className="text-sm font-bold text-foreground cursor-pointer">
+                  Live Response Streaming Output
+                </Label>
+                <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-bold border ${
+                  localStreamingOutput 
+                    ? 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border-cyan-500/30' 
+                    : 'bg-muted text-muted-foreground border-border'
+                }`}>
+                  {localStreamingOutput ? 'Enabled' : 'Disabled (Default)'}
+                </span>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                When <strong>disabled (recommended)</strong>, AI outputs are presented in fully rendered, pristine clinical cards without intermediate raw JSON tokens or stream jitter. Enable only if you wish to inspect raw response tokens.
+              </p>
+            </div>
+            <input
+              id="settings-stream-toggle"
+              type="checkbox"
+              checked={localStreamingOutput}
+              onChange={(e) => setLocalStreamingOutput(e.target.checked)}
+              className="h-5 w-5 rounded border-gray-300 text-cyan-600 focus:ring-cyan-500 cursor-pointer"
+            />
+          </div>
+
+          {/* Flag 2: Live Thinking Process Monitor */}
+          <div className="flex items-center justify-between gap-4 p-3.5 rounded-xl border bg-muted/30 border-border/70">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <Label htmlFor="settings-thinking-toggle" className="text-sm font-bold text-foreground cursor-pointer">
+                  Live AI Thinking &amp; Reasoning Stream
+                </Label>
+                <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-bold border ${
+                  localLiveThinking 
+                    ? 'bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border-indigo-500/30' 
+                    : 'bg-muted text-muted-foreground border-border'
+                }`}>
+                  {localLiveThinking ? 'Enabled' : 'Disabled (Default)'}
+                </span>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                When <strong>disabled (recommended)</strong>, internal thinking scratchpads are kept clean during generation. The final clinical synthesis, diagnostic rationale, and evidence guidelines are presented in dedicated expandable accordions.
+              </p>
+            </div>
+            <input
+              id="settings-thinking-toggle"
+              type="checkbox"
+              checked={localLiveThinking}
+              onChange={(e) => setLocalLiveThinking(e.target.checked)}
+              className="h-5 w-5 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+            />
+          </div>
+
+          <div className="p-3 rounded-xl bg-cyan-500/5 border border-cyan-500/20 text-[11px] text-muted-foreground space-y-1">
+            <p className="font-semibold text-foreground flex items-center gap-1.5">
+              <span>💡 Medical Reasoning Integration</span>
+            </p>
+            <p>
+              Even with live streams disabled, Gemini&apos;s full diagnostic reasoning, guideline references, and differential evidence are synthesized and saved in the <strong>AI Diagnosis</strong> and <strong>Clinical Inquiries</strong> sections.
             </p>
           </div>
         </CardContent>

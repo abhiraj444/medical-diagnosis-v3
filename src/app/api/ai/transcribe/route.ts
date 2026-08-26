@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenAI } from '@google/genai';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
@@ -339,29 +339,46 @@ export async function POST(req: NextRequest) {
       '';
 
     if (geminiKey) {
-      try {
-        const genAI = new GoogleGenerativeAI(geminiKey);
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
-
-        const result = await model.generateContent([
-          {
-            inlineData: {
-              data: cleanBase64,
-              mimeType: mimeType || 'audio/webm',
-            },
+      const transcribeModels = ['gemini-2.5-flash', 'gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-1.5-flash'];
+      const ai = new GoogleGenAI({
+        apiKey: geminiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
           },
-          'Transcribe this clinical audio recording/voice memo verbatim into clear text. Capture all medical terms, medication names, dosages, and patient symptoms accurately with proper clinical capitalization and punctuation. Output ONLY the raw transcribed text with no conversational preamble or commentary.',
-        ]);
+        },
+      });
 
-        const transcript = result.response.text().trim();
-        return NextResponse.json({
-          transcript,
-          provider: 'gemini-audio (fallback)',
-          model: 'gemini-2.5-flash',
-        });
-      } catch (geminiErr: any) {
-        lastError = geminiErr?.message || String(geminiErr);
-        console.error('Gemini audio transcription fallback failed:', geminiErr);
+      for (const modelName of transcribeModels) {
+        try {
+          const response = await ai.models.generateContent({
+            model: modelName,
+            contents: [
+              {
+                inlineData: {
+                  data: cleanBase64,
+                  mimeType: mimeType || 'audio/webm',
+                },
+              },
+              {
+                text: 'Transcribe this clinical audio recording/voice memo verbatim into clear text. Capture all medical terms, medication names, dosages, and patient symptoms accurately with proper clinical capitalization and punctuation. Output ONLY the raw transcribed text with no conversational preamble or commentary.',
+              },
+            ],
+          });
+
+          const transcript = (response.text || '').trim();
+          if (transcript) {
+            return NextResponse.json({
+              transcript,
+              provider: 'gemini-audio (fallback)',
+              model: modelName,
+            });
+          }
+        } catch (geminiErr: any) {
+          lastError = geminiErr?.message || String(geminiErr);
+          console.warn(`Gemini audio model ${modelName} failed, trying next...`, geminiErr?.message);
+          continue;
+        }
       }
     }
 

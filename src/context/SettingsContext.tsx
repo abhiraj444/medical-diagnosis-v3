@@ -60,6 +60,12 @@ interface SettingsContextType {
     setMergeImagesIntoSingle: (enabled: boolean) => void;
     mergeTargetKb: number;
     setMergeTargetKb: (kb: number) => void;
+
+    // Feature Flags (Default: disabled)
+    enableStreamingOutput: boolean;
+    setEnableStreamingOutput: (enabled: boolean) => void;
+    enableLiveThinking: boolean;
+    setEnableLiveThinking: (enabled: boolean) => void;
 }
 
 const SettingsContext = createContext<SettingsContextType | undefined>(undefined);
@@ -86,6 +92,10 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     const [targetImageKb, setTargetImageKbInternal] = useState<number>(50);
     const [mergeImagesIntoSingle, setMergeImagesIntoSingleInternal] = useState<boolean>(false);
     const [mergeTargetKb, setMergeTargetKbInternal] = useState<number>(150);
+
+    // Feature Flags - default to disabled (false) as requested
+    const [enableStreamingOutput, setEnableStreamingOutputInternal] = useState<boolean>(false);
+    const [enableLiveThinking, setEnableLiveThinkingInternal] = useState<boolean>(false);
 
     useEffect(() => {
         // Check if server-side environment variable is configured
@@ -189,6 +199,16 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
                 setMergeTargetKbInternal(parsed);
             }
         }
+
+        // Feature flags (default false)
+        const savedStreaming = localStorage.getItem('app_enable_streaming_output');
+        if (savedStreaming !== null) {
+            setEnableStreamingOutputInternal(savedStreaming === 'true');
+        }
+        const savedThinking = localStorage.getItem('app_enable_live_thinking');
+        if (savedThinking !== null) {
+            setEnableLiveThinkingInternal(savedThinking === 'true');
+        }
     }, []);
 
     const setAiProvider = (provider: AiProvider) => {
@@ -280,6 +300,16 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         setMergeTargetKbInternal(sanitized);
     };
 
+    const setEnableStreamingOutput = (enabled: boolean) => {
+        localStorage.setItem('app_enable_streaming_output', String(enabled));
+        setEnableStreamingOutputInternal(enabled);
+    };
+
+    const setEnableLiveThinking = (enabled: boolean) => {
+        localStorage.setItem('app_enable_live_thinking', String(enabled));
+        setEnableLiveThinkingInternal(enabled);
+    };
+
     // Derived values
     const isConfigured =
         aiProvider === 'gemini'
@@ -351,6 +381,10 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
                 setMergeImagesIntoSingle,
                 mergeTargetKb,
                 setMergeTargetKb,
+                enableStreamingOutput,
+                setEnableStreamingOutput,
+                enableLiveThinking,
+                setEnableLiveThinking,
             }}
         >
             {children}

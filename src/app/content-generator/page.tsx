@@ -44,6 +44,7 @@ import { convertPdfToImages, isPdfFile } from '@/lib/pdf-to-images';
 import { compressImagesForAi, prepareImagesForAiPrompt } from '@/lib/image-compressor';
 import { ImageCompressionOption } from '@/components/ImageCompressionOption';
 import { ClinicalThinkingBox } from '@/components/ClinicalThinkingBox';
+import { ClinicalMarkdownRenderer } from '@/components/ClinicalMarkdownRenderer';
 import Link from 'next/link';
 
 function ContentGeneratorContent() {
@@ -960,6 +961,7 @@ function ContentGeneratorContent() {
                           mergeIntoSingle={mergeImagesIntoSingle}
                           onMergeToggle={setMergeImagesIntoSingle}
                           mergeTargetKb={mergeTargetKb || 150}
+                          onMergeTargetKbChange={setMergeTargetKb}
                           attachedImages={imageFiles.filter((f) => !f.type.startsWith('audio/'))}
                           attachedCount={imageFiles.filter((f) => !f.type.startsWith('audio/')).length}
                         />
@@ -1079,10 +1081,7 @@ function ContentGeneratorContent() {
                 />
               )}
 
-              <div
-                className="prose prose-sm max-w-none dark:prose-invert text-xs sm:text-sm leading-relaxed"
-                dangerouslySetInnerHTML={{ __html: formatText(result.answer) }}
-              />
+              <ClinicalMarkdownRenderer content={result.answer} />
 
               {/* Generate Outline Button (if not yet generated) */}
               {!slides && !presentationOutline && !isLoading && (

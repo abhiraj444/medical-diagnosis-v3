@@ -1,7 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenAI } from '@google/genai';
 
 export const dynamic = 'force-dynamic';
+
+const GEMINI_FALLBACK_MODELS = [
+  'gemini-3.6-flash',
+  'gemini-2.5-flash',
+  'gemini-3.7-flash',
+  'gemini-3.1-flash-lite',
+  'gemini-1.5-flash',
+  'gemini-2.0-flash',
+];
 
 export async function POST(req: NextRequest) {
   const startTime = Date.now();
@@ -74,18 +83,47 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    const modelName = config.geminiModel || process.env.GEMINI_MODEL || 'gemini-3.7-flash';
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: modelName });
+    const requestedModel = config.geminiModel || process.env.GEMINI_MODEL || 'gemini-3.7-flash';
+    const modelsToTry = [requestedModel, ...GEMINI_FALLBACK_MODELS.filter((m) => m !== requestedModel)];
 
-    const result = await model.generateContent('Respond with "READY"');
-    const latencyMs = Date.now() - startTime;
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
+
+    let lastError: any = null;
+    for (const modelName of modelsToTry) {
+      try {
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: 'Respond with "READY"',
+        });
+
+        const latencyMs = Date.now() - startTime;
+        const responseText = response.text?.trim() || 'READY';
+
+        return NextResponse.json({
+          success: true,
+          message: `Connection successful (${latencyMs}ms): ${responseText.slice(0, 50)}`,
+          latencyMs,
+          modelUsed: modelName,
+        });
+      } catch (err: any) {
+        lastError = err;
+        console.warn(`Test route model ${modelName} failed, trying fallback...`, err?.message);
+        continue;
+      }
+    }
 
     return NextResponse.json({
-      success: true,
-      message: `Connection successful (${latencyMs}ms): ${result.response.text().trim().slice(0, 50)}`,
-      latencyMs,
-      modelUsed: modelName,
+      success: false,
+      message: lastError?.message || 'Connection test failed across all Gemini models.',
+      latencyMs: Date.now() - startTime,
+      modelUsed: requestedModel,
     });
   } catch (err: any) {
     return NextResponse.json({

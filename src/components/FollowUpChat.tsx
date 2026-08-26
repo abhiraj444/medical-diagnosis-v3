@@ -29,6 +29,7 @@ import { useToast } from '@/hooks/use-toast';
 import { isPdfFile, convertPdfToImages } from '@/lib/pdf-to-images';
 import { prepareImagesForAiPrompt } from '@/lib/image-compressor';
 import { useSettings } from '@/context/SettingsContext';
+import { ClinicalMarkdownRenderer } from './ClinicalMarkdownRenderer';
 import type { FollowUpThread } from '@/types';
 
 interface FollowUpChatProps {
@@ -205,11 +206,6 @@ export function FollowUpChat({
     setTimeout(() => setCopiedId(null), 2000);
   };
 
-  const formatText = (text: string) => {
-    if (!text) return '';
-    return text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br />');
-  };
-
   return (
     <Card className="border border-border shadow-xs overflow-hidden bg-card rounded-2xl">
       {/* Top Subtle Journal Ruler Accent */}
@@ -358,10 +354,7 @@ export function FollowUpChat({
                         </div>
                       </div>
 
-                      <div
-                        className="prose prose-sm dark:prose-invert max-w-none text-foreground text-xs sm:text-sm leading-relaxed font-sans"
-                        dangerouslySetInnerHTML={{ __html: formatText(thread.answer) }}
-                      />
+                      <ClinicalMarkdownRenderer content={thread.answer} />
 
                       {thread.reasoning && (
                         <Accordion type="single" collapsible className="w-full pt-1">
@@ -373,10 +366,9 @@ export function FollowUpChat({
                               </div>
                             </AccordionTrigger>
                             <AccordionContent>
-                              <div
-                                className="mt-2 rounded-xl bg-muted/40 p-3 sm:p-3.5 text-xs leading-relaxed text-muted-foreground border border-border font-sans"
-                                dangerouslySetInnerHTML={{ __html: formatText(thread.reasoning) }}
-                              />
+                              <div className="mt-2 rounded-xl bg-muted/40 p-3 sm:p-3.5 text-xs leading-relaxed text-muted-foreground border border-border font-sans">
+                                <ClinicalMarkdownRenderer content={thread.reasoning} />
+                              </div>
                             </AccordionContent>
                           </AccordionItem>
                         </Accordion>

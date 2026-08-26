@@ -17,30 +17,12 @@ import {
 import { FileQuestion } from 'lucide-react';
 import Image from 'next/image';
 import { Capacitor } from '@capacitor/core';
+import { ClinicalMarkdownRenderer } from '@/components/ClinicalMarkdownRenderer';
 
 interface QuestionDisplayProps {
   summary: string;
   images: string[];
 }
-
-// A simple component to render markdown-like bolding and newlines.
-const SimpleRenderer = ({ text }: { text: string | null | undefined }) => {
-  if (!text) return null;
-
-  // Split the text by bold markers, keeping the markers
-  const parts = text.split(/(\*\*.*?\*\*)/g).filter(Boolean);
-
-  return (
-    <p className="whitespace-pre-line">
-      {parts.map((part, i) => {
-        if (part.startsWith('**') && part.endsWith('**')) {
-          return <strong key={i}>{part.slice(2, -2)}</strong>;
-        }
-        return <span key={i}>{part}</span>;
-      })}
-    </p>
-  );
-};
 
 // Helper function to get the correct image source based on platform
 const getImageSrc = (img: string) => {
@@ -71,9 +53,7 @@ export function QuestionDisplay({ summary, images }: QuestionDisplayProps) {
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="prose prose-sm prose-invert max-w-none">
-          <SimpleRenderer text={summary} />
-        </div>
+        <ClinicalMarkdownRenderer content={summary} />
         {images && images.length > 0 && (
           <div>
             <h4 className="font-semibold mb-2 text-sm text-muted-foreground">Submitted Images:</h4>

@@ -1,10 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenAI } from '@google/genai';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300; // Allow up to 300s for thinking models (Vercel clamps to plan limit)
 
-const GEMINI_FALLBACK_MODELS = ['gemini-3.7-flash', 'gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash'];
+const GEMINI_FALLBACK_MODELS = [
+  'gemini-3.6-flash',
+  'gemini-2.5-flash',
+  'gemini-3.7-flash',
+  'gemini-3.1-flash-lite',
+  'gemini-1.5-flash',
+  'gemini-2.0-flash',
+];
 
 const THINKING_MODELS = ['gemini-3.7-flash', 'gemini-3.1-pro-preview', 'gemini-2.5-flash'];
 
@@ -354,7 +361,14 @@ export async function POST(req: NextRequest) {
 
     for (const modelName of modelsToTry) {
       try {
-        const ai = new GoogleGenAI({ apiKey });
+        const ai = new GoogleGenAI({
+          apiKey,
+          httpOptions: {
+            headers: {
+              'User-Agent': 'aistudio-build',
+            },
+          },
+        });
         const genConfig: any = {};
         if (isThinkingModel(modelName)) {
           const userBudget = config.thinkingBudget;
@@ -362,8 +376,6 @@ export async function POST(req: NextRequest) {
             genConfig.thinkingConfig = { thinkingBudget: 0 };
           } else if (typeof userBudget === 'number' && userBudget > 0) {
             genConfig.thinkingConfig = { thinkingBudget: userBudget };
-          } else {
-            genConfig.thinkingConfig = { thinkingBudget: -1 };
           }
         }
 
@@ -393,25 +405,19 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        return NextResponse.json({
-          text: fullText,
-          thought: fullThought || undefined,
-          modelUsed: modelName,
-        });
+        if (fullText.trim().length > 0) {
+          return NextResponse.json({
+            text: fullText,
+            thought: fullThought || undefined,
+            modelUsed: modelName,
+          });
+        }
       } catch (err: any) {
         lastError = err;
         const errMsg = (err?.message || '').toLowerCase();
-
-        if (errMsg.includes('not found') || errMsg.includes('404') || errMsg.includes('unsupported model') || errMsg.includes('503')) {
-          console.warn(`Model ${modelName} encountered error, trying next fallback:`, errMsg);
-          continue;
-        }
-
-        const { message, statusCode } = parseGoogleErrorMessage(err);
-        return NextResponse.json(
-          { error: message, rawError: err?.message || String(err || '') },
-          { status: statusCode }
-        );
+        console.warn(`Model ${modelName} encountered error (${errMsg}), attempting fallback model...`);
+        // Continue to the next fallback model in the list (e.g. gemini-3.6-flash, gemini-2.5-flash)
+        continue;
       }
     }
 

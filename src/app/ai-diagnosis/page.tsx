@@ -110,6 +110,8 @@ function AiDiagnosisContent() {
     setMergeImagesIntoSingle,
     mergeTargetKb,
     setMergeTargetKb,
+    enableStreamingOutput,
+    enableLiveThinking,
   } = useSettings();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -888,6 +890,7 @@ function AiDiagnosisContent() {
                         mergeIntoSingle={mergeImagesIntoSingle}
                         onMergeToggle={setMergeImagesIntoSingle}
                         mergeTargetKb={mergeTargetKb || 150}
+                        onMergeTargetKbChange={setMergeTargetKb}
                         attachedImages={files.filter((f) => !f.type.startsWith('audio/'))}
                         attachedCount={files.filter((f) => !f.type.startsWith('audio/')).length}
                       />
@@ -1053,10 +1056,10 @@ function AiDiagnosisContent() {
               {/* Active Streaming Reasoning & Output Preview */}
               {isLoading && (
                 <div className="space-y-4">
-                  {streamingThought && (
+                  {enableLiveThinking && streamingThought && (
                     <ClinicalThinkingBox thought={streamingThought} isStreaming={true} className="shadow-xs" />
                   )}
-                  {streamingText && (
+                  {enableStreamingOutput && streamingText && (
                     <Card className="border border-primary/30 bg-primary/5 shadow-xs overflow-hidden">
                       <CardHeader className="p-3.5 sm:p-4 bg-primary/10 border-b border-primary/20 flex flex-row items-center justify-between">
                         <div className="flex items-center gap-2">
@@ -1077,8 +1080,8 @@ function AiDiagnosisContent() {
                 </div>
               )}
 
-              {/* Completed Case Thinking Process */}
-              {!isLoading && thinkingProcess && (
+              {/* Completed Case Thinking Process (shown when feature flag enabled or in diagnosis cards) */}
+              {!isLoading && thinkingProcess && enableLiveThinking && (
                 <ClinicalThinkingBox thought={thinkingProcess} className="shadow-xs" />
               )}
 

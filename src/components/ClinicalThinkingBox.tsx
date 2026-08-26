@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { useSettings } from '@/context/SettingsContext';
 
 export interface ClinicalThinkingBoxProps {
   isLoading: boolean;
@@ -27,6 +28,8 @@ export interface ClinicalThinkingBoxProps {
   title?: string;
   defaultExpanded?: boolean;
   className?: string;
+  showLiveThinking?: boolean;
+  showStreamingOutput?: boolean;
 }
 
 export function ClinicalThinkingBox({
@@ -41,10 +44,16 @@ export function ClinicalThinkingBox({
   ],
   activeStepIndex = 0,
   modelName = 'Gemini 3.7 Flash Thinking',
-  title = 'AI Clinical Reasoning & Live Stream',
+  title = 'AI Clinical Reasoning & Progress',
   defaultExpanded = true,
   className = '',
+  showLiveThinking,
+  showStreamingOutput,
 }: ClinicalThinkingBoxProps) {
+  const { enableStreamingOutput, enableLiveThinking } = useSettings();
+  const allowStreaming = showStreamingOutput !== undefined ? showStreamingOutput : enableStreamingOutput;
+  const allowThinking = showLiveThinking !== undefined ? showLiveThinking : enableLiveThinking;
+
   const [isExpanded, setIsExpanded] = useState(defaultExpanded);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
@@ -61,7 +70,7 @@ export function ClinicalThinkingBox({
     };
   }, [isLoading]);
 
-  // Don't render anything if not loading and no thinking text exists
+  // Don't render anything if not loading and no active output is requested
   if (!isLoading && !thinkingText && !streamText) {
     return null;
   }
@@ -175,8 +184,8 @@ export function ClinicalThinkingBox({
             </div>
           )}
 
-          {/* Deep Thinking & Reasoning Log */}
-          {thinkingText && (
+          {/* Deep Thinking & Reasoning Log (when flag enabled) */}
+          {allowThinking && thinkingText && (
             <div className="space-y-1.5">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
@@ -193,8 +202,8 @@ export function ClinicalThinkingBox({
             </div>
           )}
 
-          {/* Live Content Stream Token Preview */}
-          {streamText && (
+          {/* Live Content Stream Token Preview (when flag enabled) */}
+          {allowStreaming && streamText && (
             <div className="space-y-1.5">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">

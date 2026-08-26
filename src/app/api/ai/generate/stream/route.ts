@@ -1,10 +1,17 @@
 import { NextRequest } from 'next/server';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenAI } from '@google/genai';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
 
-const GEMINI_FALLBACK_MODELS = ['gemini-3.7-flash', 'gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash'];
+const GEMINI_FALLBACK_MODELS = [
+  'gemini-3.6-flash',
+  'gemini-2.5-flash',
+  'gemini-3.7-flash',
+  'gemini-3.1-flash-lite',
+  'gemini-1.5-flash',
+  'gemini-2.0-flash',
+];
 const THINKING_MODELS = ['gemini-3.7-flash', 'gemini-3.1-pro-preview', 'gemini-2.5-flash'];
 
 function isThinkingModel(modelName: string): boolean {
@@ -188,7 +195,6 @@ export async function POST(req: NextRequest) {
 
     const requestedModel = config.geminiModel || process.env.GEMINI_MODEL || 'gemini-3.7-flash';
     const modelsToTry = [requestedModel, ...GEMINI_FALLBACK_MODELS.filter((m) => m !== requestedModel)];
-    const genAI = new GoogleGenerativeAI(apiKey);
 
     const validImages = images ? images.filter((img: any) => img && img.data && typeof img.data === 'string' && img.data.length > 50) : [];
     const imageCount = validImages.filter((img: any) => img.mimeType?.startsWith('image/')).length;
@@ -198,10 +204,10 @@ export async function POST(req: NextRequest) {
       effectivePrompt = `[CLINICAL ATTACHMENTS: ${imageCount} medical document/image page(s) attached. Thoroughly examine and extract all visible findings, lab test parameters, numerical values, reference ranges, patient demographics, and clinical text directly from the attached visual image(s) to formulate the comprehensive response.]\n\n${prompt}`;
     }
 
-    const parts: any[] = [];
+    const contents: any[] = [];
     if (validImages.length > 0) {
       for (const img of validImages) {
-        parts.push({
+        contents.push({
           inlineData: {
             data: img.data,
             mimeType: img.mimeType || 'image/jpeg',
@@ -209,7 +215,7 @@ export async function POST(req: NextRequest) {
         });
       }
     }
-    parts.push(effectivePrompt);
+    contents.push({ text: effectivePrompt });
 
     const stream = new ReadableStream({
       async start(controller) {
@@ -217,42 +223,80 @@ export async function POST(req: NextRequest) {
         let lastError: any = null;
 
         for (const modelName of modelsToTry) {
-          const modelConfig: any = { model: modelName };
-          if (isThinkingModel(modelName)) {
-            modelConfig.generationConfig = {
-              thinkingConfig: {
-                thinkingBudget: 4096,
-              },
-            };
-          }
-
           try {
-            const model = genAI.getGenerativeModel(modelConfig);
-            const result = await model.generateContentStream(parts);
-
-            controller.enqueue(
-              encoder.encode(`data: ${JSON.stringify({ modelUsed: modelName, status: 'streaming' })}\n\n`)
-            );
-            streamStarted = true;
-
-            for await (const chunk of result.stream) {
-              const text = chunk.text();
-              if (text) {
-                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text })}\n\n`));
+            const ai = new GoogleGenAI({
+              apiKey,
+              httpOptions: {
+                headers: {
+                  'User-Agent': 'aistudio-build',
+                },
+              },
+            });
+            const genConfig: any = {};
+            if (isThinkingModel(modelName)) {
+              const userBudget = config.thinkingBudget;
+              if (userBudget === 0) {
+                genConfig.thinkingConfig = { thinkingBudget: 0 };
+              } else if (typeof userBudget === 'number' && userBudget > 0) {
+                genConfig.thinkingConfig = { thinkingBudget: userBudget };
               }
             }
 
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`));
-            controller.close();
-            return;
+            const responseStream = await ai.models.generateContentStream({
+              model: modelName,
+              contents,
+              config: Object.keys(genConfig).length > 0 ? genConfig : undefined,
+            });
+
+            let chunksReceived = 0;
+            for await (const chunk of responseStream) {
+              const candidate = chunk.candidates?.[0];
+              const parts = candidate?.content?.parts;
+
+              let text = '';
+              let thinking = '';
+
+              if (parts && parts.length > 0) {
+                for (const part of parts) {
+                  if ((part as any).thought) {
+                    thinking += part.text || '';
+                  } else if (part.text) {
+                    text += part.text;
+                  }
+                }
+              } else if (chunk.text) {
+                text = chunk.text;
+              }
+
+              if (text || thinking) {
+                if (!streamStarted) {
+                  controller.enqueue(
+                    encoder.encode(`data: ${JSON.stringify({ modelUsed: modelName, status: 'streaming' })}\n\n`)
+                  );
+                  streamStarted = true;
+                }
+                chunksReceived++;
+                controller.enqueue(
+                  encoder.encode(`data: ${JSON.stringify({ text, thinking, modelUsed: modelName })}\n\n`)
+                );
+              }
+            }
+
+            if (chunksReceived > 0 || streamStarted) {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`));
+              controller.close();
+              return;
+            }
           } catch (err: any) {
             lastError = err;
             const errMsg = (err?.message || '').toLowerCase();
-            if (errMsg.includes('not found') || errMsg.includes('404') || errMsg.includes('unsupported model') || errMsg.includes('503')) {
-              console.warn(`Streaming attempt with model ${modelName} failed, trying fallback:`, errMsg);
-              continue;
+            console.warn(`Streaming attempt with model ${modelName} failed (${errMsg}), trying fallback model...`);
+            if (streamStarted) {
+              // If stream already started outputting to user, send error
+              break;
             }
-            break;
+            // Otherwise try next fallback model (e.g. gemini-3.6-flash, gemini-2.5-flash)
+            continue;
           }
         }
 
