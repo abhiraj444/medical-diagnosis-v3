@@ -5,11 +5,8 @@ export const dynamic = 'force-dynamic';
 
 const GEMINI_FALLBACK_MODELS = [
   'gemini-3.6-flash',
-  'gemini-2.5-flash',
   'gemini-3.7-flash',
   'gemini-3.1-flash-lite',
-  'gemini-1.5-flash',
-  'gemini-2.0-flash',
 ];
 
 export async function POST(req: NextRequest) {
