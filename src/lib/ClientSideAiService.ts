@@ -663,8 +663,10 @@ export async function executeStreamingAiPrompt(
                                 modelUsed: parsed.modelUsed,
                             });
                         }
-                    } catch (parseErr) {
-                        // ignore minor partial SSE parse issues
+                    } catch (parseErr: any) {
+                        if (parseErr?.message && !parseErr.message.includes('JSON')) {
+                            throw parseErr;
+                        }
                     }
                 }
             }

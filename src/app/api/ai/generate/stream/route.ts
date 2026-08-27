@@ -5,11 +5,11 @@ export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
 
 const GEMINI_FALLBACK_MODELS = [
-  'gemini-3.6-flash',
-  'gemini-3.7-flash',
-  'gemini-3.1-flash-lite',
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
+  'gemini-1.5-flash',
 ];
-const THINKING_MODELS = ['gemini-3.7-flash', 'gemini-3.1-pro-preview' ];
+const THINKING_MODELS = ['gemini-2.5-pro', 'gemini-3.7-flash', 'gemini-3.1-pro-preview'];
 
 function isThinkingModel(modelName: string): boolean {
   return THINKING_MODELS.some((m) => modelName.toLowerCase().includes(m));
@@ -124,7 +124,7 @@ export async function POST(req: NextRequest) {
           errLower.includes('gpt-oss-120b') ||
           errLower.includes('unprocessable')
         ) {
-          errorMsg = `The selected model (${payload.model}) does not support image inputs on OpenRouter. Please select a multimodal/vision model (such as Gemini 3.7 Flash, GPT-4o, Claude 3.7 Sonnet, or Llama 3.2 Vision) in Settings when uploading medical images.`;
+          errorMsg = `The selected model (${payload.model}) does not support image inputs on OpenRouter. Please select a multimodal/vision model (such as Gemini 2.5 Flash, GPT-4o, Claude 3.7 Sonnet, or Llama 3.2 Vision) in Settings when uploading medical images.`;
         }
         return new Response(JSON.stringify({ error: errorMsg }), {
           status: upstreamRes.status >= 400 && upstreamRes.status < 600 ? upstreamRes.status : 500,
@@ -134,6 +134,7 @@ export async function POST(req: NextRequest) {
 
       const stream = new ReadableStream({
         async start(controller) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ status: 'connected', modelUsed: payload.model })}\n\n`));
           const reader = upstreamRes.body!.getReader();
           const decoder = new TextDecoder();
           let buffer = '';
@@ -181,9 +182,11 @@ export async function POST(req: NextRequest) {
 
       return new Response(stream, {
         headers: {
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache, no-transform',
-          Connection: 'keep-alive',
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-cache, no-transform, no-store, must-revalidate',
+          'Connection': 'keep-alive',
+          'X-Accel-Buffering': 'no',
+          'Content-Encoding': 'none',
         },
       });
     }
@@ -203,7 +206,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const requestedModel = config.geminiModel || process.env.GEMINI_MODEL || 'gemini-3.7-flash';
+    const requestedModel = config.geminiModel || process.env.GEMINI_MODEL || 'gemini-2.5-flash';
     const modelsToTry = [requestedModel, ...GEMINI_FALLBACK_MODELS.filter((m) => m !== requestedModel)];
 
     const validImages = images ? images.filter((img: any) => img && img.data && typeof img.data === 'string' && img.data.length > 50) : [];
@@ -229,6 +232,7 @@ export async function POST(req: NextRequest) {
 
     const stream = new ReadableStream({
       async start(controller) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ status: 'connected', modelUsed: requestedModel })}\n\n`));
         let streamStarted = false;
         let lastError: any = null;
 
@@ -280,20 +284,17 @@ export async function POST(req: NextRequest) {
 
               if (text || thinking) {
                 if (!streamStarted) {
-                  controller.enqueue(
-                    encoder.encode(`data: ${JSON.stringify({ modelUsed: modelName, status: 'streaming' })}\n\n`)
-                  );
                   streamStarted = true;
                 }
                 chunksReceived++;
                 controller.enqueue(
-                  encoder.encode(`data: ${JSON.stringify({ text, thinking, modelUsed: modelName })}\n\n`)
+                  encoder.encode(`data: ${JSON.stringify({ text, thinking, modelUsed: modelName, status: 'streaming' })}\n\n`)
                 );
               }
             }
 
             if (chunksReceived > 0 || streamStarted) {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`));
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true, modelUsed: modelName })}\n\n`));
               controller.close();
               return;
             }
@@ -305,7 +306,7 @@ export async function POST(req: NextRequest) {
               // If stream already started outputting to user, send error
               break;
             }
-            // Otherwise try next fallback model (e.g. gemini-3.6-flash, gemini-2.5-flash)
+            // Otherwise try next fallback model
             continue;
           }
         }
@@ -318,9 +319,11 @@ export async function POST(req: NextRequest) {
 
     return new Response(stream, {
       headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache, no-transform',
-        Connection: 'keep-alive',
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform, no-store, must-revalidate',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+        'Content-Encoding': 'none',
       },
     });
   } catch (error: any) {

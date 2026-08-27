@@ -1,13 +1,14 @@
 import type { DiagnosisItem, ClinicalAnswerData, Slide, ReportKnowledgeData, ContentItem } from '@/types';
 
 /**
- * Repairs truncated or partial JSON strings by closing unclosed quotes, brackets, and braces.
+ * Repairs truncated, partial, or malformed JSON strings by closing unclosed quotes,
+ * brackets, braces, and trailing commas.
  */
 export function repairJsonString(jsonStr: string): string {
-  let text = jsonStr.trim();
+  let text = (jsonStr || '').trim();
   if (!text) return '{}';
 
-  // Remove markdown code fences if present
+  // 1. Remove markdown code fences if present
   if (text.startsWith('```')) {
     text = text.replace(/^```(?:json)?\s*/i, '');
     const endFence = text.lastIndexOf('```');
@@ -16,10 +17,13 @@ export function repairJsonString(jsonStr: string): string {
     }
   }
 
-  // Remove trailing commas before closing braces/brackets
+  // 2. Remove non-printable control chars except \n, \r, \t
+  text = text.replace(/[\u0000-\u0008\u000B-\u000C\u000E-\u001F\u007F-\u009F]/g, ' ');
+
+  // 3. Remove trailing commas before closing braces/brackets
   text = text.replace(/,\s*([\]}])/g, '$1');
 
-  // Count unclosed quotes, braces, brackets
+  // 4. Count unclosed quotes, braces, brackets
   let inString = false;
   let isEscaped = false;
   const stack: string[] = [];
@@ -50,18 +54,26 @@ export function repairJsonString(jsonStr: string): string {
     }
   }
 
-  // If ended inside a string, close it
+  // If stream cut off inside a string, close quote
   if (inString) {
     text += '"';
   }
 
-  // Clean trailing commas that might have been left at the end before closing
+  // Clean trailing keys or colons that might have been left at the end (e.g. `"type":` or `"bold":`)
+  text = text.replace(/:\s*$/, ': null');
   text = text.replace(/,\s*$/, '');
 
-  // Close remaining unclosed brackets in reverse
+  // Close remaining unclosed brackets/braces in reverse
   while (stack.length > 0) {
     const closingChar = stack.pop();
     text += closingChar;
+  }
+
+  // If the result looks like multiple comma-separated objects without outer array `[...]`
+  // e.g. `{ "title": "A" }, { "title": "B" }`
+  const trimmed = text.trim();
+  if (trimmed.startsWith('{') && trimmed.includes('},{') && !trimmed.startsWith('[')) {
+    text = `[${trimmed}]`;
   }
 
   return text;
@@ -74,7 +86,16 @@ export function repairJsonString(jsonStr: string): string {
 export function parseAiJson<T>(rawText: string, fallback: T): T {
   if (!rawText || typeof rawText !== 'string') return fallback;
 
-  const cleaned = rawText.trim();
+  let cleaned = rawText.trim();
+
+  // Strip markdown code fence if wrapping the entire string
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, '');
+    const endFence = cleaned.lastIndexOf('```');
+    if (endFence !== -1) {
+      cleaned = cleaned.substring(0, endFence).trim();
+    }
+  }
 
   // 1. Direct parse attempt
   try {
@@ -82,7 +103,7 @@ export function parseAiJson<T>(rawText: string, fallback: T): T {
     return unwrapExpected(parsed, fallback);
   } catch {}
 
-  // 2. Extract from markdown code fence ```json ... ```
+  // 2. Extract from markdown code fence ```json ... ``` inside string
   const codeBlockMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)(?:```|$)/i);
   if (codeBlockMatch && codeBlockMatch[1]) {
     const blockContent = codeBlockMatch[1].trim();
@@ -98,25 +119,42 @@ export function parseAiJson<T>(rawText: string, fallback: T): T {
     }
   }
 
-  // 3. Extract bracket contents
-  const bracketMatch = cleaned.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-  if (bracketMatch && bracketMatch[0]) {
-    try {
-      let jsonText = bracketMatch[0];
-      // Clean invalid control characters
-      jsonText = jsonText.replace(/[\u0000-\u001F\u007F-\u009F]/g, (c) => (c === '\n' || c === '\r' || c === '\t' ? c : ' '));
-      const parsed = JSON.parse(jsonText);
-      return unwrapExpected(parsed, fallback);
-    } catch {
+  // 3. If fallback is an array (e.g. Slide[]), prioritize finding array `[`
+  if (Array.isArray(fallback)) {
+    const firstBracket = cleaned.indexOf('[');
+    if (firstBracket !== -1) {
+      const arraySubstring = cleaned.substring(firstBracket);
       try {
-        const repaired = repairJsonString(bracketMatch[0]);
+        const repaired = repairJsonString(arraySubstring);
         const parsed = JSON.parse(repaired);
         return unwrapExpected(parsed, fallback);
       } catch {}
     }
   }
 
-  // 4. Try repairing the entire raw text
+  // 4. Extract bracket contents [ ... ] or { ... }
+  const firstBrace = cleaned.indexOf('{');
+  const firstBracket = cleaned.indexOf('[');
+  let startIdx = -1;
+
+  if (firstBrace !== -1 && firstBracket !== -1) {
+    startIdx = Math.min(firstBrace, firstBracket);
+  } else if (firstBrace !== -1) {
+    startIdx = firstBrace;
+  } else if (firstBracket !== -1) {
+    startIdx = firstBracket;
+  }
+
+  if (startIdx !== -1) {
+    const targetSubstring = cleaned.substring(startIdx);
+    try {
+      const repaired = repairJsonString(targetSubstring);
+      const parsed = JSON.parse(repaired);
+      return unwrapExpected(parsed, fallback);
+    } catch {}
+  }
+
+  // 5. Try repairing the entire raw text as last resort
   try {
     const repaired = repairJsonString(cleaned);
     const parsed = JSON.parse(repaired);
@@ -188,9 +226,9 @@ export function extractProgressiveDiagnosis(rawText: string): {
 
       if (Array.isArray(parsed.diagnoses) && parsed.diagnoses.length > 0) {
         result.diagnoses = parsed.diagnoses
-          .filter((d: any) => d && typeof d === 'object' && (d.diagnosis || d.condition))
+          .filter((d: any) => d && typeof d === 'object' && (d.diagnosis || d.condition || d.name))
           .map((d: any, idx: number) => ({
-            diagnosis: d.diagnosis || d.condition || `Differential #${idx + 1}`,
+            diagnosis: d.diagnosis || d.condition || d.name || `Differential #${idx + 1}`,
             confidenceLevel: typeof d.confidenceLevel === 'number' ? d.confidenceLevel : 0.8,
             lifeThreatCategory: d.lifeThreatCategory || 'Emergent',
             reasoning: d.reasoning || d.rationale || '',
@@ -242,56 +280,126 @@ export function extractProgressiveDiagnosis(rawText: string): {
 }
 
 /**
- * Extracts completed Slide objects from a streaming JSON string as they are generated.
+ * Extracts progressive Slide objects from a streaming JSON string as they are generated in real-time.
+ * Uses a multi-tiered extraction strategy:
+ * 1. Array repair & parse
+ * 2. Per-slide bracket balancing scanner for completed and currently active slides
  */
 export function extractProgressiveSlides(rawText: string): Slide[] {
   if (!rawText || rawText.trim().length === 0) return [];
 
-  // Try parsing full/repaired JSON
-  try {
-    const parsed = parseAiJson<any>(rawText, null);
-    const slidesArray = Array.isArray(parsed) ? parsed : parsed?.slides;
+  let text = rawText.trim();
+  if (text.startsWith('```')) {
+    text = text.replace(/^```(?:json)?\s*/i, '');
+    const endFence = text.lastIndexOf('```');
+    if (endFence !== -1) {
+      text = text.substring(0, endFence).trim();
+    }
+  }
 
-    if (Array.isArray(slidesArray) && slidesArray.length > 0) {
-      const validSlides: Slide[] = [];
-      for (const s of slidesArray) {
-        if (s && typeof s === 'object' && s.title) {
-          validSlides.push({
-            title: s.title,
-            content: Array.isArray(s.content) ? sanitizeContentItems(s.content) : [],
-            summary: typeof s.summary === 'string' ? s.summary : '',
-            clinicalPearls: Array.isArray(s.clinicalPearls) ? s.clinicalPearls : [],
-            proactiveQuestions: Array.isArray(s.proactiveQuestions) ? s.proactiveQuestions : [],
-          });
+  const slides: Slide[] = [];
+  const seenTitles = new Set<string>();
+
+  // Tier 1: Try parsing full/repaired JSON array
+  try {
+    const parsed = parseAiJson<Slide[]>(text, []);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      for (const s of parsed) {
+        if (s && typeof s === 'object' && s.title && typeof s.title === 'string' && s.title.trim()) {
+          const title = s.title.trim();
+          if (!seenTitles.has(title)) {
+            seenTitles.add(title);
+            slides.push({
+              title,
+              content: Array.isArray(s.content) ? sanitizeContentItems(s.content) : [],
+              summary: typeof s.summary === 'string' ? s.summary : '',
+              clinicalPearls: Array.isArray(s.clinicalPearls) ? s.clinicalPearls : [],
+              proactiveQuestions: Array.isArray(s.proactiveQuestions) ? s.proactiveQuestions : [],
+            });
+          }
         }
       }
-      if (validSlides.length > 0) return validSlides;
+      if (slides.length > 0) return slides;
     }
   } catch {}
 
-  // Fallback: extract individual completed slide JSON objects via regex
-  const completedSlides: Slide[] = [];
-  const slideRegex = /\{\s*"title"\s*:\s*"([^"]+)"[\s\S]*?"content"\s*:\s*\[([\s\S]*?)\][\s\S]*?\}(?=\s*,|\s*\]|$)/g;
-  let match;
+  // Tier 2: Per-Slide Bracket Balancing Scanner
+  // Finds each slide object candidate starting with `{"title"` or containing `"title":`
+  try {
+    let searchIdx = 0;
+    while (searchIdx < text.length) {
+      const titleKeyIdx = text.indexOf('"title"', searchIdx);
+      if (titleKeyIdx === -1) break;
 
-  while ((match = slideRegex.exec(rawText)) !== null) {
-    try {
-      const slideObjStr = match[0];
-      const repaired = repairJsonString(slideObjStr);
-      const s = JSON.parse(repaired);
-      if (s && s.title) {
-        completedSlides.push({
-          title: s.title,
-          content: Array.isArray(s.content) ? sanitizeContentItems(s.content) : [],
-          summary: typeof s.summary === 'string' ? s.summary : '',
-          clinicalPearls: Array.isArray(s.clinicalPearls) ? s.clinicalPearls : [],
-          proactiveQuestions: Array.isArray(s.proactiveQuestions) ? s.proactiveQuestions : [],
-        });
+      // Backtrack to the opening `{` for this slide object
+      let objStart = -1;
+      for (let i = titleKeyIdx; i >= 0; i--) {
+        if (text[i] === '{') {
+          objStart = i;
+          break;
+        }
       }
-    } catch {}
-  }
 
-  return completedSlides;
+      if (objStart === -1) {
+        searchIdx = titleKeyIdx + 7;
+        continue;
+      }
+
+      // Walk forward to find matching `}` or stream tail
+      let depth = 0;
+      let inStr = false;
+      let isEsc = false;
+      let objEnd = -1;
+
+      for (let i = objStart; i < text.length; i++) {
+        const c = text[i];
+        if (c === '\\' && inStr) {
+          isEsc = !isEsc;
+          continue;
+        }
+        if (c === '"' && !isEsc) {
+          inStr = !inStr;
+          continue;
+        }
+        isEsc = false;
+        if (!inStr) {
+          if (c === '{') depth++;
+          else if (c === '}') {
+            depth--;
+            if (depth === 0) {
+              objEnd = i + 1;
+              break;
+            }
+          }
+        }
+      }
+
+      // If object hasn't closed yet (it's actively streaming!), take up to the end of string
+      const rawSlideObj = objEnd !== -1 ? text.substring(objStart, objEnd) : text.substring(objStart);
+      const repaired = repairJsonString(rawSlideObj);
+
+      try {
+        const parsedSlide = JSON.parse(repaired);
+        if (parsedSlide && typeof parsedSlide === 'object' && parsedSlide.title && typeof parsedSlide.title === 'string' && parsedSlide.title.trim()) {
+          const title = parsedSlide.title.trim();
+          if (!seenTitles.has(title)) {
+            seenTitles.add(title);
+            slides.push({
+              title,
+              content: Array.isArray(parsedSlide.content) ? sanitizeContentItems(parsedSlide.content) : [],
+              summary: typeof parsedSlide.summary === 'string' ? parsedSlide.summary : '',
+              clinicalPearls: Array.isArray(parsedSlide.clinicalPearls) ? parsedSlide.clinicalPearls : [],
+              proactiveQuestions: Array.isArray(parsedSlide.proactiveQuestions) ? parsedSlide.proactiveQuestions : [],
+            });
+          }
+        }
+      } catch {}
+
+      searchIdx = objEnd !== -1 ? objEnd : text.length;
+    }
+  } catch {}
+
+  return slides;
 }
 
 /**
@@ -312,18 +420,22 @@ function sanitizeContentItems(items: any[]): ContentItem[] {
     } else if (item.type === 'bullet_list' && Array.isArray(item.items)) {
       result.push({
         type: 'bullet_list',
-        items: item.items.map((i: any) => ({
-          text: typeof i === 'string' ? i : i.text || '',
-          bold: Array.isArray(i.bold) ? i.bold : [],
-        })),
+        items: item.items
+          .filter((i: any) => i && (typeof i === 'string' || (typeof i === 'object' && i.text)))
+          .map((i: any) => ({
+            text: typeof i === 'string' ? i : i.text || '',
+            bold: Array.isArray(i.bold) ? i.bold : [],
+          })),
       });
     } else if (item.type === 'numbered_list' && Array.isArray(item.items)) {
       result.push({
         type: 'numbered_list',
-        items: item.items.map((i: any) => ({
-          text: typeof i === 'string' ? i : i.text || '',
-          bold: Array.isArray(i.bold) ? i.bold : [],
-        })),
+        items: item.items
+          .filter((i: any) => i && (typeof i === 'string' || (typeof i === 'object' && i.text)))
+          .map((i: any) => ({
+            text: typeof i === 'string' ? i : i.text || '',
+            bold: Array.isArray(i.bold) ? i.bold : [],
+          })),
       });
     } else if (item.type === 'table' && Array.isArray(item.headers)) {
       result.push({
@@ -388,7 +500,8 @@ export function extractProgressiveClinicalAnswer(rawText: string): {
     trimmed.startsWith('```\n[') ||
     trimmed.startsWith('```\n{') ||
     trimmed.includes('"title":') ||
-    trimmed.includes('"content":');
+    trimmed.includes('"content":') ||
+    trimmed.includes('"answer":');
 
   if (!isJsonLike) {
     result.answer = rawText;

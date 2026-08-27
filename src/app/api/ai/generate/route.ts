@@ -5,9 +5,9 @@ export const dynamic = 'force-dynamic';
 export const maxDuration = 300; // Allow up to 300s for thinking models (Vercel clamps to plan limit)
 
 const GEMINI_FALLBACK_MODELS = [
-  'gemini-3.6-flash',
-  'gemini-3.7-flash',
-  'gemini-3.1-flash-lite',
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
+  'gemini-1.5-flash',
 ];
 
 const THINKING_MODELS = ['gemini-3.7-flash', 'gemini-3.1-pro-preview'];
