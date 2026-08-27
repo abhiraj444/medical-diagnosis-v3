@@ -22,6 +22,7 @@ import {
   Image as ImageIcon,
   X,
   FileText,
+  Square,
 } from 'lucide-react';
 import { VoiceInputButton } from './VoiceInputButton';
 import { SpeechSynthesisButton } from './SpeechSynthesisButton';
@@ -36,6 +37,7 @@ interface FollowUpChatProps {
   proactiveQuestions?: string[];
   threads?: FollowUpThread[];
   onAskFollowUp: (question: string, images?: string[]) => Promise<void>;
+  onStop?: () => void;
   isLoading?: boolean;
   title?: string;
   description?: string;
@@ -47,6 +49,7 @@ export function FollowUpChat({
   proactiveQuestions = [],
   threads = [],
   onAskFollowUp,
+  onStop,
   isLoading = false,
   title = 'Clinical Inquiries & Case Consultation',
   description = 'Explore diagnostic blind spots, guideline updates, or ask custom clinical questions with attached documents.',
@@ -382,18 +385,33 @@ export function FollowUpChat({
           </div>
         )}
 
-        {/* Loading State */}
+        {/* Loading State with Stop Button */}
         {isLoading && (
-          <div className="flex items-center gap-3 p-4 rounded-xl border border-primary/30 bg-primary/5 animate-pulse">
-            <Loader2 className="h-4 w-4 animate-spin text-primary shrink-0" />
-            <div className="space-y-0.5 flex-1 min-w-0">
-              <p className="text-xs sm:text-sm font-bold text-primary">
-                Preceptor AI consulting clinical evidence &amp; guidelines...
-              </p>
-              <p className="text-[11px] text-muted-foreground">
-                Analyzing drug interactions, renal adjustments, attached documents, and management algorithms
-              </p>
+          <div className="flex items-center justify-between gap-3 p-4 rounded-xl border border-primary/30 bg-primary/5 animate-pulse">
+            <div className="flex items-center gap-3 min-w-0">
+              <Loader2 className="h-4 w-4 animate-spin text-primary shrink-0" />
+              <div className="space-y-0.5 min-w-0">
+                <p className="text-xs sm:text-sm font-bold text-primary truncate">
+                  Preceptor AI consulting clinical evidence &amp; guidelines...
+                </p>
+                <p className="text-[11px] text-muted-foreground truncate">
+                  Analyzing drug interactions, renal adjustments, attached documents, and management algorithms
+                </p>
+              </div>
             </div>
+            {onStop && (
+              <Button
+                type="button"
+                size="sm"
+                variant="destructive"
+                onClick={onStop}
+                className="h-7 px-2.5 text-xs gap-1.5 shrink-0 shadow-xs"
+                title="Stop AI consultation"
+              >
+                <Square className="h-3 w-3 fill-current" />
+                <span>Stop</span>
+              </Button>
+            )}
           </div>
         )}
 
@@ -489,20 +507,34 @@ export function FollowUpChat({
                 </span>
               </div>
 
-              <Button
-                type="button"
-                size="sm"
-                onClick={handleSend}
-                disabled={isLoading || (!customQuestion.trim() && attachedFiles.length === 0)}
-                className="h-8 px-3 text-xs gap-1.5 shadow-2xs font-semibold"
-              >
-                {isLoading ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Send className="h-3.5 w-3.5" />
-                )}
-                <span>Ask Preceptor</span>
-              </Button>
+              {isLoading && onStop ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="destructive"
+                  onClick={onStop}
+                  className="h-8 px-3 text-xs gap-1.5 shadow-2xs font-semibold"
+                  title="Stop ongoing request"
+                >
+                  <Square className="h-3.5 w-3.5 fill-current" />
+                  <span>Stop</span>
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={handleSend}
+                  disabled={isLoading || (!customQuestion.trim() && attachedFiles.length === 0)}
+                  className="h-8 px-3 text-xs gap-1.5 shadow-2xs font-semibold"
+                >
+                  {isLoading ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Send className="h-3.5 w-3.5" />
+                  )}
+                  <span>Ask Preceptor</span>
+                </Button>
+              )}
             </div>
           </div>
         </div>

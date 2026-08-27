@@ -6,7 +6,7 @@ import { Button } from './ui/button';
 import { useAudioRecorder, RecordedAudio } from '@/hooks/useAudioRecorder';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
 import { useSettings } from '@/context/SettingsContext';
-import { ClientSideAiService } from '@/lib/ClientSideAiService';
+import { ClientSideAiService, isAbortError } from '@/lib/ClientSideAiService';
 import { useToast } from '@/hooks/use-toast';
 
 interface AudioRecorderProps {
@@ -28,8 +28,16 @@ export function AudioRecorder({
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcript, setTranscript] = useState<string | null>(null);
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
+  const transcribeAbortControllerRef = React.useRef<AbortController | null>(null);
   const { aiConfig, sttModel, sttProvider } = useSettings();
   const { toast } = useToast();
+
+  const handleStopTranscribe = () => {
+    if (transcribeAbortControllerRef.current) {
+      transcribeAbortControllerRef.current.abort();
+      transcribeAbortControllerRef.current = null;
+    }
+  };
 
   const {
     isRecording,
@@ -66,13 +74,16 @@ export function AudioRecorder({
 
   const handleTranscribeSpeech = async () => {
     if (!lastRecording) return;
+    const controller = new AbortController();
+    transcribeAbortControllerRef.current = controller;
     setIsTranscribing(true);
     setTranscribeError(null);
     try {
       const text = await ClientSideAiService.transcribeAudio(
         aiConfig,
         lastRecording.dataUri,
-        lastRecording.blob.type || 'audio/webm'
+        lastRecording.blob.type || 'audio/webm',
+        { signal: controller.signal }
       );
       if (!text || text.trim() === '') {
         throw new Error('No clear speech was detected in this recording.');
@@ -83,6 +94,10 @@ export function AudioRecorder({
         description: `Transcribed successfully using ${sttModel || 'Whisper'}.`,
       });
     } catch (err: any) {
+      if (isAbortError(err)) {
+        toast({ title: 'Cancelled', description: 'Audio transcription stopped by user.' });
+        return;
+      }
       console.error('Transcription error:', err);
       const errMsg = err?.message || 'Failed to convert audio to text.';
       setTranscribeError(errMsg);
@@ -93,6 +108,7 @@ export function AudioRecorder({
       });
     } finally {
       setIsTranscribing(false);
+      transcribeAbortControllerRef.current = null;
     }
   };
 
@@ -266,26 +282,30 @@ export function AudioRecorder({
               <span className="text-[11px] text-muted-foreground">
                 Convert directly to text using Whisper STT or attach audio directly:
               </span>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={isTranscribing}
-                onClick={handleTranscribeSpeech}
-                className="h-7 text-xs font-medium gap-1.5 border-primary/40 hover:border-primary text-primary hover:bg-primary/5"
-              >
-                {isTranscribing ? (
-                  <>
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    <span>Transcribing with {modelLabel}...</span>
-                  </>
-                ) : (
-                  <>
-                    <Sparkles className="h-3.5 w-3.5" />
-                    <span>Convert to Text ({modelLabel.replace('-large-v3-turbo', ' Turbo')})</span>
-                  </>
-                )}
-              </Button>
+              {isTranscribing ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="destructive"
+                  onClick={handleStopTranscribe}
+                  className="h-7 text-xs font-medium gap-1.5 shadow-2xs"
+                  title="Stop audio transcription"
+                >
+                  <Square className="h-3.5 w-3.5 fill-current" />
+                  <span>Stop Transcribing</span>
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={handleTranscribeSpeech}
+                  className="h-7 text-xs font-medium gap-1.5 border-primary/40 hover:border-primary text-primary hover:bg-primary/5"
+                >
+                  <Sparkles className="h-3.5 w-3.5" />
+                  <span>Convert to Text ({modelLabel.replace('-large-v3-turbo', ' Turbo')})</span>
+                </Button>
+              )}
             </div>
           )}
         </div>

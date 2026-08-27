@@ -289,6 +289,13 @@ function detectMimeFromBase64(base64: string): string {
     return 'image/jpeg';
 }
 
+export function isAbortError(err: any): boolean {
+    if (!err) return false;
+    if (err.name === 'AbortError') return true;
+    const msg = (err?.message || String(err || '')).toLowerCase();
+    return msg.includes('aborted') || msg.includes('user aborted') || msg.includes('the operation was aborted');
+}
+
 /**
  * Universal prompt executor supporting both Google Gemini models (default gemini-3.7-flash, custom Gemini names)
  * and Custom OpenAI-compatible endpoints (OpenAI, OpenRouter, Groq, Ollama, DeepSeek, Mistral, etc.).
@@ -296,14 +303,22 @@ function detectMimeFromBase64(base64: string): string {
 export async function executeAiPrompt(
     configOrKey: string | AiConfig | undefined,
     prompt: string,
-    images?: string[]
+    images?: string[],
+    options?: { signal?: AbortSignal }
 ): Promise<string> {
+    if (options?.signal?.aborted) {
+        throw new DOMException('The operation was aborted by the user', 'AbortError');
+    }
+
     const config = resolveAiConfig(configOrKey);
 
     // Normalize images into mimeType & base64 objects
     const normalizedImages: Array<{ data: string; mimeType: string }> = [];
     if (images && images.length > 0) {
         for (const img of images) {
+            if (options?.signal?.aborted) {
+                throw new DOMException('The operation was aborted by the user', 'AbortError');
+            }
             const normalized = await normalizeMediaForGemini(img);
             if (normalized && normalized.data) {
                 normalizedImages.push(normalized);
@@ -324,6 +339,7 @@ export async function executeAiPrompt(
                     images: normalizedImages,
                     config,
                 }),
+                signal: options?.signal,
             });
 
             if (apiRes.ok) {
@@ -338,12 +354,19 @@ export async function executeAiPrompt(
                 }
             }
         } catch (fetchErr: any) {
+            if (isAbortError(fetchErr) || options?.signal?.aborted) {
+                throw new DOMException('The operation was aborted by the user', 'AbortError');
+            }
             // If the server explicitly returned an error message (like missing API key, rate limit, etc.), rethrow it
             if (fetchErr?.message && !fetchErr.message.toLowerCase().includes('failed to fetch') && !fetchErr.message.toLowerCase().includes('networkerror')) {
                 throw fetchErr;
             }
             console.warn('API Route fetch unavailable, falling back to direct client execution...', fetchErr);
         }
+    }
+
+    if (options?.signal?.aborted) {
+        throw new DOMException('The operation was aborted by the user', 'AbortError');
     }
 
     // Direct fallback for custom endpoints
@@ -600,14 +623,22 @@ export async function executeStreamingAiPrompt(
     configOrKey: string | AiConfig | undefined,
     prompt: string,
     images?: string[],
-    onChunk?: (payload: StreamChunkCallbackPayload) => void
+    onChunk?: (payload: StreamChunkCallbackPayload) => void,
+    options?: { signal?: AbortSignal }
 ): Promise<{ text: string; thinking: string }> {
+    if (options?.signal?.aborted) {
+        throw new DOMException('The operation was aborted by the user', 'AbortError');
+    }
+
     const config = resolveAiConfig(configOrKey);
 
     // Normalize images
     const normalizedImages: Array<{ data: string; mimeType: string }> = [];
     if (images && images.length > 0) {
         for (const img of images) {
+            if (options?.signal?.aborted) {
+                throw new DOMException('The operation was aborted by the user', 'AbortError');
+            }
             const normalized = await normalizeMediaForGemini(img);
             if (normalized && normalized.data) {
                 normalizedImages.push(normalized);
@@ -628,6 +659,7 @@ export async function executeStreamingAiPrompt(
                     images: normalizedImages,
                     config,
                 }),
+                signal: options?.signal,
             });
 
             if (!response.ok || !response.body) {
@@ -640,6 +672,11 @@ export async function executeStreamingAiPrompt(
             let buffer = '';
 
             while (true) {
+                if (options?.signal?.aborted) {
+                    try { await reader.cancel(); } catch {}
+                    throw new DOMException('The operation was aborted by the user', 'AbortError');
+                }
+
                 const { done, value } = await reader.read();
                 if (done) break;
 
@@ -648,6 +685,11 @@ export async function executeStreamingAiPrompt(
                 buffer = lines.pop() || '';
 
                 for (const line of lines) {
+                    if (options?.signal?.aborted) {
+                        try { await reader.cancel(); } catch {}
+                        throw new DOMException('The operation was aborted by the user', 'AbortError');
+                    }
+
                     const trimmed = line.trim();
                     if (!trimmed || !trimmed.startsWith('data:')) continue;
 
@@ -694,6 +736,9 @@ export async function executeStreamingAiPrompt(
                 return { text: accumulatedText, thinking: accumulatedThinking };
             }
         } catch (streamErr: any) {
+            if (isAbortError(streamErr) || options?.signal?.aborted) {
+                throw new DOMException('The operation was aborted by the user', 'AbortError');
+            }
             const errMsg = (streamErr?.message || '').toLowerCase();
             if (
                 errMsg.includes('api_key_invalid') ||
@@ -710,8 +755,12 @@ export async function executeStreamingAiPrompt(
         }
     }
 
+    if (options?.signal?.aborted) {
+        throw new DOMException('The operation was aborted by the user', 'AbortError');
+    }
+
     // Fallback: non-streaming execution
-    const fallbackText = await executeAiPrompt(config, prompt, images);
+    const fallbackText = await executeAiPrompt(config, prompt, images, options);
     if (onChunk) {
         onChunk({ text: fallbackText, thinking: '', isDone: true });
     }
@@ -779,7 +828,7 @@ export const ClientSideAiService = {
     /**
      * Diagnostic Ping to verify AI credentials and endpoint responsiveness
      */
-    async testConnection(configOrKey?: string | AiConfig): Promise<{
+    async testConnection(configOrKey?: string | AiConfig, options?: { signal?: AbortSignal }): Promise<{
         success: boolean;
         message: string;
         modelUsed: string;
@@ -795,7 +844,9 @@ export const ClientSideAiService = {
         try {
             const reply = await executeAiPrompt(
                 config,
-                'Respond with the single word "READY" to verify clinical AI readiness and connectivity.'
+                'Respond with the single word "READY" to verify clinical AI readiness and connectivity.',
+                undefined,
+                options
             );
             const latencyMs = Date.now() - startTime;
             return {
@@ -822,13 +873,17 @@ export const ClientSideAiService = {
         apiKeyOrConfig: string | AiConfig,
         prompt: string,
         images?: string[],
-        onStreamChunk?: (payload: StreamChunkCallbackPayload) => void
+        onStreamChunk?: (payload: StreamChunkCallbackPayload) => void,
+        options?: { signal?: AbortSignal }
     ): Promise<string> {
+        if (options?.signal?.aborted) {
+            throw new DOMException('The operation was aborted by the user', 'AbortError');
+        }
         if (onStreamChunk) {
-            const res = await executeStreamingAiPrompt(apiKeyOrConfig, prompt, images, onStreamChunk);
+            const res = await executeStreamingAiPrompt(apiKeyOrConfig, prompt, images, onStreamChunk, options);
             return res.text;
         }
-        return executeAiPrompt(apiKeyOrConfig, prompt, images);
+        return executeAiPrompt(apiKeyOrConfig, prompt, images, options);
     },
 
     /**
@@ -845,6 +900,7 @@ export const ClientSideAiService = {
             language?: TargetLanguage;
             audienceMode?: AudienceMode;
             onStreamChunk?: (payload: StreamChunkCallbackPayload) => void;
+            signal?: AbortSignal;
         }
     ): Promise<ReportKnowledgeData> {
         const language = options?.language || 'english';
@@ -919,7 +975,7 @@ Return a single, strictly valid JSON object:
 ${patientData ? `\nPatient Notes & Data:\n${patientData}` : ''}
 `;
 
-        const text = await this._runPrompt(apiKeyOrConfig, prompt, images, options?.onStreamChunk);
+        const text = await this._runPrompt(apiKeyOrConfig, prompt, images, options?.onStreamChunk, { signal: options?.signal });
 
         const fallback: ReportKnowledgeData = {
             reportType: 'Clinical Diagnostic Report',
@@ -948,6 +1004,7 @@ ${patientData ? `\nPatient Notes & Data:\n${patientData}` : ''}
             language?: TargetLanguage;
             audienceMode?: AudienceMode;
             onStreamChunk?: (payload: StreamChunkCallbackPayload) => void;
+            signal?: AbortSignal;
             callbacks?: {
                 onThoughtChunk?: (chunk: string, fullThought: string) => void;
                 onTextChunk?: (chunk: string, fullText: string) => void;
@@ -1095,7 +1152,8 @@ ${patientData ? `\nPatient Data & Clinical Notes:\n${patientData}` : ''}
             apiKeyOrConfig,
             prompt,
             images,
-            options?.onStreamChunk || options?.callbacks ? chunkHandler : undefined
+            options?.onStreamChunk || options?.callbacks ? chunkHandler : undefined,
+            { signal: options?.signal }
         );
 
         const fallback = {
@@ -1151,6 +1209,7 @@ ${patientData ? `\nPatient Data & Clinical Notes:\n${patientData}` : ''}
             language?: TargetLanguage;
             audienceMode?: AudienceMode;
             onStreamChunk?: (payload: StreamChunkCallbackPayload) => void;
+            signal?: AbortSignal;
         }
     ): Promise<{
         answer: string;
@@ -1195,7 +1254,7 @@ ${
 }
 `;
 
-        const text = await this._runPrompt(apiKeyOrConfig, prompt, params.images, params.onStreamChunk);
+        const text = await this._runPrompt(apiKeyOrConfig, prompt, params.images, params.onStreamChunk, { signal: params.signal });
 
         return parseAiJson(text, {
             answer: text,
@@ -1219,6 +1278,7 @@ ${
             language?: TargetLanguage;
             audienceMode?: AudienceMode;
             onStreamChunk?: (payload: StreamChunkCallbackPayload) => void;
+            signal?: AbortSignal;
         }
     ): Promise<{
         answer: string;
@@ -1257,7 +1317,7 @@ ${params.slideSummary ? `**Slide Summary:** ${params.slideSummary}` : ''}
 }
 `;
 
-        const text = await this._runPrompt(apiKeyOrConfig, prompt, params.images, params.onStreamChunk);
+        const text = await this._runPrompt(apiKeyOrConfig, prompt, params.images, params.onStreamChunk, { signal: params.signal });
 
         return parseAiJson(text, {
             answer: text,
@@ -1277,6 +1337,7 @@ ${params.slideSummary ? `**Slide Summary:** ${params.slideSummary}` : ''}
             language?: TargetLanguage;
             audienceMode?: AudienceMode;
             onStreamChunk?: (payload: StreamChunkCallbackPayload) => void;
+            signal?: AbortSignal;
         }
     ) {
         const language = options?.language || 'english';
@@ -1298,7 +1359,7 @@ Answer the clinical inquiry or case presentation in detail according to the sele
 
         if (question) prompt += `\n\nQuestion: ${question}`;
 
-        const text = await this._runPrompt(apiKeyOrConfig, prompt, images, options?.onStreamChunk);
+        const text = await this._runPrompt(apiKeyOrConfig, prompt, images, options?.onStreamChunk, { signal: options?.signal });
 
         return parseAiJson(text, {
             answer: text,
@@ -1320,6 +1381,7 @@ Answer the clinical inquiry or case presentation in detail according to the sele
             language?: TargetLanguage;
             audienceMode?: AudienceMode;
             onStreamChunk?: (payload: StreamChunkCallbackPayload) => void;
+            signal?: AbortSignal;
         }
     ) {
         const language = options?.language || 'english';
@@ -1331,7 +1393,7 @@ Summarize the following clinical question or patient data into a concise 1-2 sen
 `;
         if (question) prompt += `\n\nInput: ${question}`;
 
-        const text = await this._runPrompt(apiKeyOrConfig, prompt, images, options?.onStreamChunk);
+        const text = await this._runPrompt(apiKeyOrConfig, prompt, images, options?.onStreamChunk, { signal: options?.signal });
         return { summary: text.trim() };
     },
 
@@ -1348,6 +1410,7 @@ Summarize the following clinical question or patient data into a concise 1-2 sen
             language?: TargetLanguage;
             audienceMode?: AudienceMode;
             onStreamChunk?: (payload: StreamChunkCallbackPayload) => void;
+            signal?: AbortSignal;
         }
     ) {
         const language = input.language || 'english';
@@ -1385,7 +1448,7 @@ Reasoning: ${input.reasoning}
 `;
         }
 
-        const text = await this._runPrompt(apiKeyOrConfig, prompt, undefined, input.onStreamChunk);
+        const text = await this._runPrompt(apiKeyOrConfig, prompt, undefined, input.onStreamChunk, { signal: input.signal });
 
         return parseAiJson(text, {
             outline: [
@@ -1414,6 +1477,7 @@ Reasoning: ${input.reasoning}
             language?: TargetLanguage;
             audienceMode?: AudienceMode;
             onStreamChunk?: (payload: StreamChunkCallbackPayload) => void;
+            signal?: AbortSignal;
         }
     ): Promise<Slide[]> {
         const language = input.language || 'english';
@@ -1458,7 +1522,7 @@ ${input.selectedTopics.map((t: string) => `- ${t}`).join('\n')}
 Produce ONLY the JSON array.
 `;
 
-        const text = await this._runPrompt(apiKeyOrConfig, prompt, undefined, input.onStreamChunk);
+        const text = await this._runPrompt(apiKeyOrConfig, prompt, undefined, input.onStreamChunk, { signal: input.signal });
 
         const fallback = input.selectedTopics.map((t: string) => ({
             title: t,
@@ -1490,6 +1554,7 @@ Produce ONLY the JSON array.
             audienceMode?: AudienceMode;
             onStreamChunk?: (payload: StreamChunkCallbackPayload) => void;
             onOutlineReady?: (outline: string[]) => void;
+            signal?: AbortSignal;
         }
     ): Promise<{ outline: string[]; slides: Slide[] }> {
         const language = options?.language || 'english';
@@ -1503,6 +1568,7 @@ Produce ONLY the JSON array.
             language: language,
             audienceMode: audienceMode,
             onStreamChunk: options?.onStreamChunk,
+            signal: options?.signal,
         });
 
         const selectedTopics = outlineData.outline.slice(0, 10);
@@ -1519,6 +1585,7 @@ Produce ONLY the JSON array.
             language: language,
             audienceMode: audienceMode,
             onStreamChunk: options?.onStreamChunk,
+            signal: options?.signal,
         });
 
         return {
@@ -1535,6 +1602,7 @@ Produce ONLY the JSON array.
             existingTopics: string[];
             language?: TargetLanguage;
             audienceMode?: AudienceMode;
+            signal?: AbortSignal;
         }
     ) {
         const language = input.language || 'english';
@@ -1552,7 +1620,7 @@ Output a JSON object with a single key "topics" containing an array of strings i
 ${input.topic ? `Topic: ${input.topic}` : `Case: ${input.question}`}
 `;
 
-        const text = await executeAiPrompt(apiKeyOrConfig, prompt);
+        const text = await executeAiPrompt(apiKeyOrConfig, prompt, undefined, { signal: input.signal });
         return parseAiJson(text, { topics: [] });
     },
 
@@ -1562,6 +1630,7 @@ ${input.topic ? `Topic: ${input.topic}` : `Case: ${input.question}`}
         options?: {
             language?: TargetLanguage;
             audienceMode?: AudienceMode;
+            signal?: AbortSignal;
         }
     ): Promise<Slide> {
         const language = options?.language || 'english';
@@ -1594,7 +1663,7 @@ Format:
 }
 `;
 
-        const text = await executeAiPrompt(apiKeyOrConfig, prompt);
+        const text = await executeAiPrompt(apiKeyOrConfig, prompt, undefined, { signal: options?.signal });
         return parseAiJson(text, {
             title: topic,
             content: [{ type: 'paragraph', text: `Detailed information for ${topic}.` }],
@@ -1613,8 +1682,13 @@ Format:
     async transcribeAudio(
         apiKeyOrConfig: string | AiConfig | { sttConfig?: SttConfig } | undefined,
         audioDataUriOrBase64: string,
-        mimeType = 'audio/webm'
+        mimeType = 'audio/webm',
+        options?: { signal?: AbortSignal }
     ): Promise<string> {
+        if (options?.signal?.aborted) {
+            throw new DOMException('The operation was aborted by the user', 'AbortError');
+        }
+
         const config = resolveAiConfig(apiKeyOrConfig as any);
         const sttConfig = (apiKeyOrConfig as any)?.sttConfig || config.sttConfig;
 
@@ -1629,6 +1703,7 @@ Format:
                     sttConfig,
                     config,
                 }),
+                signal: options?.signal,
             });
 
             if (res.ok) {
@@ -1642,8 +1717,15 @@ Format:
                     console.warn('Transcribe route returned error:', errorData.error);
                 }
             }
-        } catch (err) {
+        } catch (err: any) {
+            if (isAbortError(err) || options?.signal?.aborted) {
+                throw new DOMException('The operation was aborted by the user', 'AbortError');
+            }
             console.warn('Server audio transcription route failed, trying direct client path:', err);
+        }
+
+        if (options?.signal?.aborted) {
+            throw new DOMException('The operation was aborted by the user', 'AbortError');
         }
 
         // 2. Direct client-side Groq / Whisper fallback if key is directly present
@@ -1664,14 +1746,22 @@ Format:
                     method: 'POST',
                     headers: { Authorization: `Bearer ${sttConfig.apiKey}` },
                     body: formData,
+                    signal: options?.signal,
                 });
                 if (groqRes.ok) {
                     const gData = await groqRes.json();
                     if (gData.text) return gData.text.trim();
                 }
-            } catch (gErr) {
+            } catch (gErr: any) {
+                if (isAbortError(gErr) || options?.signal?.aborted) {
+                    throw new DOMException('The operation was aborted by the user', 'AbortError');
+                }
                 console.warn('Direct client Groq transcription fallback error:', gErr);
             }
+        }
+
+        if (options?.signal?.aborted) {
+            throw new DOMException('The operation was aborted by the user', 'AbortError');
         }
 
         // 3. Direct Gemini audio transcription fallback
@@ -1699,6 +1789,9 @@ Format:
 
             return result.response.text().trim();
         } catch (fallbackErr: any) {
+            if (isAbortError(fallbackErr) || options?.signal?.aborted) {
+                throw new DOMException('The operation was aborted by the user', 'AbortError');
+            }
             console.error('Direct audio transcription failed:', fallbackErr);
             throw new Error(fallbackErr?.message || 'Failed to transcribe audio note.');
         }
@@ -1717,6 +1810,7 @@ Format:
             action: 'replace_content' | 'expand_selected' | string;
             language?: TargetLanguage;
             audienceMode?: AudienceMode;
+            signal?: AbortSignal;
         }
     ): Promise<Slide[]> {
         const language = input.language || 'english';
@@ -1792,7 +1886,7 @@ ${JSON.stringify(
 ]
 `;
 
-        const text = await executeAiPrompt(apiKeyOrConfig, prompt);
+        const text = await executeAiPrompt(apiKeyOrConfig, prompt, undefined, { signal: input.signal });
 
         type ModifiedSlideItem = Slide & { originalIndex?: number };
         const parsedModified = parseAiJson<ModifiedSlideItem[]>(text, []);
@@ -1823,6 +1917,7 @@ ${JSON.stringify(
 
         return mergedSlides;
     },
+    isAbortError,
     formatModelDisplayName,
     resolveAiConfig,
 };

@@ -31,12 +31,13 @@ import {
   FlaskConical,
   Activity,
   Layers,
+  Square,
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { useSettings } from '@/context/SettingsContext';
 import { ModeLanguageSelector } from '@/components/ModeLanguageSelector';
 import { LocalDataService, type LocalCase } from '@/lib/LocalDataService';
-import { ClientSideAiService, extractProgressiveDiagnosis } from '@/lib/ClientSideAiService';
+import { ClientSideAiService, extractProgressiveDiagnosis, isAbortError } from '@/lib/ClientSideAiService';
 import { convertPdfToImages, isPdfFile } from '@/lib/pdf-to-images';
 import { compressImagesForAi, prepareImagesForAiPrompt } from '@/lib/image-compressor';
 import { ImageCompressionOption } from '@/components/ImageCompressionOption';
@@ -96,6 +97,22 @@ function AiDiagnosisContent() {
   const [thinkingProcess, setThinkingProcess] = useState<string | undefined>(undefined);
   const loadedCaseIdRef = useRef<string | null>(null);
   const lastDiagStreamUpdateRef = useRef<number>(0);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const followUpAbortControllerRef = useRef<AbortController | null>(null);
+
+  const handleStopCurrentRequest = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+  };
+
+  const handleStopFollowUp = () => {
+    if (followUpAbortControllerRef.current) {
+      followUpAbortControllerRef.current.abort();
+      followUpAbortControllerRef.current = null;
+    }
+  };
 
   const { toast } = useToast();
   const { user, loading: authLoading } = useAuth();
@@ -346,6 +363,8 @@ function AiDiagnosisContent() {
       return;
     }
 
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     setIsAnalyzingReport(true);
     setErrorMessage(null);
     try {
@@ -367,7 +386,11 @@ function AiDiagnosisContent() {
         aiConfig,
         patientData.trim() || undefined,
         imagesForAi,
-        { language, audienceMode }
+        {
+          language,
+          audienceMode,
+          signal: controller.signal,
+        }
       );
 
       setReportKnowledge(reportData);
@@ -407,12 +430,17 @@ function AiDiagnosisContent() {
         description: `Extracted ${reportData.totalParametersCount || 0} parameters with What-If explanations (${prepSummary}).`,
       });
     } catch (error: any) {
+      if (isAbortError(error)) {
+        toast({ title: 'Cancelled', description: 'Report parameter analysis was stopped by user.' });
+        return;
+      }
       console.error('Report analysis failed:', error);
       const msg = error?.message || 'Failed to analyze medical report parameters.';
       setErrorMessage(msg);
       toast({ title: 'Report Analysis Error', description: msg, variant: 'destructive', duration: 9000 });
     } finally {
       setIsAnalyzingReport(false);
+      abortControllerRef.current = null;
     }
   };
 
@@ -432,6 +460,8 @@ function AiDiagnosisContent() {
       });
       return;
     }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     setIsLoading(true);
     setErrorMessage(null);
     setStreamingThought('');
@@ -460,6 +490,7 @@ function AiDiagnosisContent() {
         {
           language,
           audienceMode,
+          signal: controller.signal,
           callbacks: {
             onThoughtChunk: (_chunk, fullThought) => setStreamingThought(fullThought),
             onTextChunk: (_chunk, fullText) => {
@@ -534,6 +565,11 @@ function AiDiagnosisContent() {
         description: `Clinical case analysis complete (${prepSummary}).`,
       });
     } catch (error: any) {
+      if (isAbortError(error)) {
+        setStreamingStatus('');
+        toast({ title: 'Cancelled', description: 'Clinical diagnosis generation was stopped by user.' });
+        return;
+      }
       console.error('Diagnosis failed:', error);
       const msg = error?.message || (typeof error === 'string' ? error : 'Failed to generate diagnosis.');
       setErrorMessage(msg);
@@ -541,11 +577,14 @@ function AiDiagnosisContent() {
     } finally {
       setIsLoading(false);
       setStreamingStatus('');
+      abortControllerRef.current = null;
     }
   };
 
-  const handleAskFollowUp = async (question: string) => {
+  const handleAskFollowUp = async (question: string, images?: string[]) => {
     if (!isConfigured || isAskingFollowUp || !user) return;
+    const controller = new AbortController();
+    followUpAbortControllerRef.current = controller;
     setIsAskingFollowUp(true);
     try {
       const conversationHistory = followUpThreads.map((t) => ({
@@ -566,6 +605,8 @@ function AiDiagnosisContent() {
           conversationHistory,
           language,
           audienceMode,
+          images,
+          signal: controller.signal,
         }
       );
 
@@ -602,11 +643,16 @@ function AiDiagnosisContent() {
       }
 
       toast({ title: 'Answer Received', description: 'Clinical consultant updated response.' });
-    } catch (e) {
+    } catch (e: any) {
+      if (isAbortError(e)) {
+        toast({ title: 'Cancelled', description: 'Clinical follow-up inquiry was stopped by user.' });
+        return;
+      }
       console.error('Follow-up failed:', e);
       toast({ title: 'Error', description: 'Failed to get follow-up answer.', variant: 'destructive' });
     } finally {
       setIsAskingFollowUp(false);
+      followUpAbortControllerRef.current = null;
     }
   };
 
@@ -930,57 +976,78 @@ function AiDiagnosisContent() {
                 <div className="space-y-2 pt-2 border-t border-border">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     {/* Action A: Report Knowledge & Lab Parameter Analysis */}
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={handleAnalyzeReportOnly}
-                      className="h-10 text-xs font-semibold gap-1.5 border-primary/40 hover:bg-primary/10 text-primary"
-                      disabled={isBusy || (!patientData.trim() && files.length === 0)}
-                    >
-                      {isAnalyzingReport ? (
-                        <>
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          <span>Extracting Params...</span>
-                        </>
-                      ) : (
-                        <>
-                          <FlaskConical className="h-3.5 w-3.5" />
-                          <span>Report Parameters</span>
-                        </>
-                      )}
-                    </Button>
+                    {isAnalyzingReport ? (
+                      <Button
+                        type="button"
+                        variant="destructive"
+                        onClick={handleStopCurrentRequest}
+                        className="h-10 text-xs font-semibold gap-1.5 shadow-xs"
+                        title="Stop report extraction"
+                      >
+                        <Square className="h-3.5 w-3.5 fill-current" />
+                        <span>Stop Analysis</span>
+                      </Button>
+                    ) : (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={handleAnalyzeReportOnly}
+                        className="h-10 text-xs font-semibold gap-1.5 border-primary/40 hover:bg-primary/10 text-primary"
+                        disabled={isLoading || (!patientData.trim() && files.length === 0)}
+                      >
+                        <FlaskConical className="h-3.5 w-3.5" />
+                        <span>Report Parameters</span>
+                      </Button>
+                    )}
 
                     {/* Action B: Full Comprehensive Clinical Diagnosis */}
-                    <Button
-                      type="submit"
-                      className="h-10 text-xs font-semibold gap-1.5 shadow-xs bg-primary hover:bg-primary/90 text-primary-foreground"
-                      disabled={isBusy || (!patientData.trim() && files.length === 0)}
-                    >
-                      {isLoading ? (
-                        <>
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          <span>Diagnosing...</span>
-                        </>
-                      ) : (
-                        <>
-                          <BrainCircuit className="h-3.5 w-3.5" />
-                          <span>Full Diagnosis</span>
-                        </>
-                      )}
-                    </Button>
+                    {isLoading ? (
+                      <Button
+                        type="button"
+                        variant="destructive"
+                        onClick={handleStopCurrentRequest}
+                        className="h-10 text-xs font-semibold gap-1.5 shadow-xs"
+                        title="Stop full diagnosis generation"
+                      >
+                        <Square className="h-3.5 w-3.5 fill-current" />
+                        <span>Stop Diagnosis</span>
+                      </Button>
+                    ) : (
+                      <Button
+                        type="submit"
+                        className="h-10 text-xs font-semibold gap-1.5 shadow-xs bg-primary hover:bg-primary/90 text-primary-foreground"
+                        disabled={isAnalyzingReport || (!patientData.trim() && files.length === 0)}
+                      >
+                        <BrainCircuit className="h-3.5 w-3.5" />
+                        <span>Full Diagnosis</span>
+                      </Button>
+                    )}
                   </div>
 
-                  {/* Multi-Step Animated Progress Bar */}
+                  {/* Multi-Step Animated Progress Bar with Quick Stop Action */}
                   {(isLoading || isAnalyzingReport) && (
                     <div className="space-y-1.5 pt-1">
                       <div className="flex items-center justify-between text-[11px] font-semibold text-primary">
-                        <span className="flex items-center gap-1.5">
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                          <span>{PROGRESS_MESSAGES[progressStep]}</span>
+                        <span className="flex items-center gap-1.5 truncate">
+                          <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                          <span className="truncate">{PROGRESS_MESSAGES[progressStep]}</span>
                         </span>
-                        <span className="font-mono text-[10px]">
-                          {Math.round(((progressStep + 1) / PROGRESS_MESSAGES.length) * 100)}%
-                        </span>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="font-mono text-[10px]">
+                            {Math.round(((progressStep + 1) / PROGRESS_MESSAGES.length) * 100)}%
+                          </span>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="destructive"
+                            onClick={handleStopCurrentRequest}
+                            className="h-5 px-1.5 text-[10px] gap-1 shrink-0 font-medium"
+                            title="Stop request"
+                          >
+                            <Square className="h-2.5 w-2.5 fill-current" />
+                            <span>Stop</span>
+                          </Button>
+                        </div>
                       </div>
                       <div className="h-1.5 w-full bg-muted rounded-full overflow-hidden">
                         <div
@@ -1266,6 +1333,7 @@ function AiDiagnosisContent() {
                   proactiveQuestions={proactiveQuestions}
                   threads={followUpThreads}
                   onAskFollowUp={handleAskFollowUp}
+                  onStop={handleStopFollowUp}
                   isLoading={isAskingFollowUp}
                   title="Clinical Blind Spots & Interactive Q&A"
                   description="Proactive questions generated for this case. Click any chip to ask, or type a custom question."

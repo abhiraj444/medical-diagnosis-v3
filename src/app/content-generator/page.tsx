@@ -23,7 +23,8 @@ import {
   AlertCircle,
   AlertTriangle,
   RotateCcw,
-  Upload
+  Upload,
+  Square,
 } from 'lucide-react';
 import { SlideEditor } from '@/components/SlideEditor';
 import type { Slide } from '@/types';
@@ -31,7 +32,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { useSettings } from '@/context/SettingsContext';
 import { ModeLanguageSelector } from '@/components/ModeLanguageSelector';
 import { LocalDataService, type LocalCase } from '@/lib/LocalDataService';
-import { ClientSideAiService, formatModelDisplayName } from '@/lib/ClientSideAiService';
+import { ClientSideAiService, formatModelDisplayName, isAbortError } from '@/lib/ClientSideAiService';
 import { extractProgressiveClinicalAnswer, extractProgressiveSlides } from '@/lib/streaming-parser';
 import type { StructuredQuestion, FollowUpThread } from '@/types';
 import { QuestionDisplay } from '@/components/QuestionDisplay';
@@ -108,6 +109,22 @@ function ContentGeneratorContent() {
   const loadedCaseIdRef = useRef<string | null>(null);
   const lastQuestionUpdateRef = useRef<number>(0);
   const lastSlideUpdateRef = useRef<number>(0);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const followUpAbortControllerRef = useRef<AbortController | null>(null);
+
+  const handleStopCurrentRequest = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+  };
+
+  const handleStopFollowUp = () => {
+    if (followUpAbortControllerRef.current) {
+      followUpAbortControllerRef.current.abort();
+      followUpAbortControllerRef.current = null;
+    }
+  };
 
   const { toast } = useToast();
   const { user, loading: authLoading } = useAuth();
@@ -500,6 +517,8 @@ function ContentGeneratorContent() {
       });
       return;
     }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     setIsLoading(true);
     setErrorMessage(null);
     setStreamThinking('');
@@ -526,6 +545,7 @@ function ContentGeneratorContent() {
       const response = await ClientSideAiService.answerClinicalQuestion(aiConfig, question.trim() || undefined, imagesForAi, {
         language,
         audienceMode,
+        signal: controller.signal,
         onStreamChunk: handleQuestionStreamChunk,
       });
 
@@ -564,12 +584,18 @@ function ContentGeneratorContent() {
         description: `Clinical question analyzed successfully (${prepSummary}).`,
       });
     } catch (error: any) {
+      if (isAbortError(error)) {
+        setStreamStep('');
+        toast({ title: 'Cancelled', description: 'Clinical answer generation was stopped by user.' });
+        return;
+      }
       console.error('Question submission failed:', error);
       const msg = error?.message || (typeof error === 'string' ? error : 'Failed to answer question.');
       setErrorMessage(msg);
       toast({ title: 'AI Generation Error', description: msg, variant: 'destructive', duration: 9000 });
     } finally {
       setIsLoading(false);
+      abortControllerRef.current = null;
     }
   };
 
@@ -586,6 +612,8 @@ function ContentGeneratorContent() {
       });
       return;
     }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     setIsLoading(true);
     setErrorMessage(null);
     setStreamThinking('');
@@ -598,6 +626,7 @@ function ContentGeneratorContent() {
         topic: topic.trim(),
         language,
         audienceMode,
+        signal: controller.signal,
         onStreamChunk: handleOutlineStreamChunk,
       });
       setPresentationOutline(data.outline);
@@ -633,17 +662,25 @@ function ContentGeneratorContent() {
       const savedId = await LocalDataService.saveCase(caseData);
       if (!currentCaseId) setCurrentCaseId(savedId);
     } catch (error: any) {
+      if (isAbortError(error)) {
+        setStreamStep('');
+        toast({ title: 'Cancelled', description: 'Outline generation was stopped by user.' });
+        return;
+      }
       console.error('Topic submission failed:', error);
       const msg = error?.message || (typeof error === 'string' ? error : 'Failed to generate outline.');
       setErrorMessage(msg);
       toast({ title: 'AI Generation Error', description: msg, variant: 'destructive', duration: 9000 });
     } finally {
       setIsLoading(false);
+      abortControllerRef.current = null;
     }
   };
 
   const handleGenerateOutline = async () => {
     if (!user || !isConfigured) return;
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     setIsLoading(true);
     setErrorMessage(null);
     setStreamThinking('');
@@ -659,6 +696,7 @@ function ContentGeneratorContent() {
         topic: result?.topic || topic,
         language,
         audienceMode,
+        signal: controller.signal,
         onStreamChunk: handleOutlineStreamChunk,
       });
       setPresentationOutline(data.outline);
@@ -679,17 +717,25 @@ function ContentGeneratorContent() {
         }
       }
     } catch (error: any) {
+      if (isAbortError(error)) {
+        setStreamStep('');
+        toast({ title: 'Cancelled', description: 'Outline generation was stopped by user.' });
+        return;
+      }
       console.error('Outline generation failed:', error);
       const msg = error?.message || (typeof error === 'string' ? error : 'Failed to generate outline.');
       setErrorMessage(msg);
       toast({ title: 'AI Generation Error', description: msg, variant: 'destructive', duration: 9000 });
     } finally {
       setIsLoading(false);
+      abortControllerRef.current = null;
     }
   };
 
   const handleGeneratePresentation = async () => {
     if (!user || !isConfigured || selectedTopics.length === 0) return;
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     setIsLoading(true);
     setErrorMessage(null);
     setStreamThinking('');
@@ -709,6 +755,7 @@ function ContentGeneratorContent() {
         caseSummaryForPresentation: question,
         language,
         audienceMode,
+        signal: controller.signal,
         onStreamChunk: handleSlideStreamChunk,
       });
 
@@ -732,17 +779,25 @@ function ContentGeneratorContent() {
       }
       toast({ title: 'Presentation Generated', description: 'Your slide deck has been saved locally.' });
     } catch (error: any) {
+      if (isAbortError(error)) {
+        setStreamStep('');
+        toast({ title: 'Cancelled', description: 'Presentation generation was stopped by user.' });
+        return;
+      }
       console.error('Presentation generation failed:', error);
       const msg = error?.message || (typeof error === 'string' ? error : 'Failed to generate slides.');
       setErrorMessage(msg);
       toast({ title: 'AI Generation Error', description: msg, variant: 'destructive', duration: 9000 });
     } finally {
       setIsLoading(false);
+      abortControllerRef.current = null;
     }
   };
 
   const handleAskFollowUp = async (q: string, images?: string[]) => {
     if (!isConfigured || isAskingFollowUp || !user) return;
+    const controller = new AbortController();
+    followUpAbortControllerRef.current = controller;
     setIsAskingFollowUp(true);
     try {
       const conversationHistory = followUpThreads.map((t) => ({
@@ -759,6 +814,7 @@ function ContentGeneratorContent() {
         conversationHistory,
         language,
         audienceMode,
+        signal: controller.signal,
       });
 
       const newThread: FollowUpThread = {
@@ -788,11 +844,16 @@ function ContentGeneratorContent() {
           await LocalDataService.saveCase(caseData);
         }
       }
-    } catch (e) {
+    } catch (e: any) {
+      if (isAbortError(e)) {
+        toast({ title: 'Cancelled', description: 'Follow-up inquiry was stopped by user.' });
+        return;
+      }
       console.error('Follow-up error:', e);
       toast({ title: 'Error', description: 'Failed to answer follow-up.', variant: 'destructive' });
     } finally {
       setIsAskingFollowUp(false);
+      followUpAbortControllerRef.current = null;
     }
   };
 
@@ -1079,23 +1140,27 @@ function ContentGeneratorContent() {
                     )}
                   </div>
 
-                  <Button
-                    type="submit"
-                    className="w-full h-10 text-xs sm:text-sm font-semibold shadow-xs"
-                    disabled={isLoading || (!question.trim() && imageFiles.length === 0)}
-                  >
-                    {isLoading ? (
-                      <>
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        Analyzing...
-                      </>
-                    ) : (
-                      <>
-                        <BrainCircuit className="mr-2 h-4 w-4" />
-                        Analyze & Generate Clinical Answer
-                      </>
-                    )}
-                  </Button>
+                  {isLoading ? (
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      onClick={handleStopCurrentRequest}
+                      className="w-full h-10 text-xs sm:text-sm font-semibold shadow-xs gap-2"
+                      title="Stop request"
+                    >
+                      <Square className="h-4 w-4 fill-current" />
+                      <span>Stop Analysis</span>
+                    </Button>
+                  ) : (
+                    <Button
+                      type="submit"
+                      className="w-full h-10 text-xs sm:text-sm font-semibold shadow-xs"
+                      disabled={!question.trim() && imageFiles.length === 0}
+                    >
+                      <BrainCircuit className="mr-2 h-4 w-4" />
+                      Analyze & Generate Clinical Answer
+                    </Button>
+                  )}
                 </form>
               </TabsContent>
 
@@ -1124,23 +1189,27 @@ function ContentGeneratorContent() {
                     />
                   </div>
 
-                  <Button
-                    type="submit"
-                    className="w-full h-10 text-xs sm:text-sm font-semibold shadow-xs"
-                    disabled={isLoading || !topic.trim()}
-                  >
-                    {isLoading ? (
-                      <>
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        Generating Outline...
-                      </>
-                    ) : (
-                      <>
-                        <Wand2 className="mr-2 h-4 w-4" />
-                        Generate Presentation Outline
-                      </>
-                    )}
-                  </Button>
+                  {isLoading ? (
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      onClick={handleStopCurrentRequest}
+                      className="w-full h-10 text-xs sm:text-sm font-semibold shadow-xs gap-2"
+                      title="Stop request"
+                    >
+                      <Square className="h-4 w-4 fill-current" />
+                      <span>Stop Generating Outline</span>
+                    </Button>
+                  ) : (
+                    <Button
+                      type="submit"
+                      className="w-full h-10 text-xs sm:text-sm font-semibold shadow-xs"
+                      disabled={!topic.trim()}
+                    >
+                      <Wand2 className="mr-2 h-4 w-4" />
+                      Generate Presentation Outline
+                    </Button>
+                  )}
                 </form>
               </TabsContent>
             </Tabs>
@@ -1170,6 +1239,17 @@ function ContentGeneratorContent() {
                 {streamStep || 'Consultant AI analyzing clinical guidelines & synthesizing content...'}
               </p>
             </div>
+            <Button
+              type="button"
+              variant="destructive"
+              size="sm"
+              onClick={handleStopCurrentRequest}
+              className="h-8 text-xs font-semibold gap-1.5 shadow-xs"
+              title="Stop current generation"
+            >
+              <Square className="h-3.5 w-3.5 fill-current" />
+              <span>Stop Request</span>
+            </Button>
           </Card>
           {streamThinking && (
             <ClinicalThinkingBox
@@ -1303,23 +1383,27 @@ function ContentGeneratorContent() {
                     })}
                   </div>
 
-                  <Button
-                    onClick={handleGeneratePresentation}
-                    disabled={isLoading || selectedTopics.length === 0}
-                    className="w-full sm:w-auto h-10 text-xs sm:text-sm font-semibold gap-2 shadow-xs"
-                  >
-                    {isLoading ? (
-                      <>
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                        Generating {selectedTopics.length} Slide(s)...
-                      </>
-                    ) : (
-                      <>
-                        <ArrowRight className="h-4 w-4" />
-                        Generate Presentation ({selectedTopics.length} Slides)
-                      </>
-                    )}
-                  </Button>
+                  {isLoading ? (
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      onClick={handleStopCurrentRequest}
+                      className="w-full sm:w-auto h-10 text-xs sm:text-sm font-semibold gap-2 shadow-xs"
+                      title="Stop slide generation"
+                    >
+                      <Square className="h-4 w-4 fill-current" />
+                      <span>Stop Generating Slides</span>
+                    </Button>
+                  ) : (
+                    <Button
+                      onClick={handleGeneratePresentation}
+                      disabled={selectedTopics.length === 0}
+                      className="w-full sm:w-auto h-10 text-xs sm:text-sm font-semibold gap-2 shadow-xs"
+                    >
+                      <ArrowRight className="h-4 w-4" />
+                      Generate Presentation ({selectedTopics.length} Slides)
+                    </Button>
+                  )}
                 </div>
               )}
 
@@ -1368,6 +1452,7 @@ function ContentGeneratorContent() {
             proactiveQuestions={proactiveQuestions}
             threads={followUpThreads}
             onAskFollowUp={handleAskFollowUp}
+            onStop={handleStopFollowUp}
             isLoading={isAskingFollowUp}
             title="Clinical Inquiries & Q&A"
             description="Explore guidelines, pathophysiology mechanisms, or ask custom questions regarding this topic."

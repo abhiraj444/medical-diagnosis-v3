@@ -25,6 +25,7 @@ import {
   Paperclip,
   Image as ImageIcon,
   X,
+  Square,
 } from 'lucide-react';
 import {
   Table,
@@ -46,7 +47,7 @@ import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Badge } from './ui/badge';
 import type { Slide, ContentItem } from '@/types';
-import { ClientSideAiService } from '@/lib/ClientSideAiService';
+import { ClientSideAiService, isAbortError } from '@/lib/ClientSideAiService';
 import { useSettings } from '@/context/SettingsContext';
 import { useToast } from '@/hooks/use-toast';
 import { isPdfFile, convertPdfToImages } from '@/lib/pdf-to-images';
@@ -346,6 +347,14 @@ export const EnhancedSlideRenderer: React.FC<EnhancedSlideRendererProps> = ({
   const [attachedPreviews, setAttachedPreviews] = useState<string[]>([]);
   const [isProcessingFiles, setIsProcessingFiles] = useState(false);
   const slideFileInputRef = React.useRef<HTMLInputElement>(null);
+  const slideAbortControllerRef = React.useRef<AbortController | null>(null);
+
+  const handleStopSlideQuestion = () => {
+    if (slideAbortControllerRef.current) {
+      slideAbortControllerRef.current.abort();
+      slideAbortControllerRef.current = null;
+    }
+  };
 
   const fileToDataUri = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
@@ -416,6 +425,8 @@ export const EnhancedSlideRenderer: React.FC<EnhancedSlideRendererProps> = ({
     const q = (questionText || slideQuestion).trim() || (attachedFiles.length > 0 ? 'Please analyze the attached image/document in the context of this slide.' : '');
     if (!q || !isConfigured || isAskingSlide) return;
 
+    const controller = new AbortController();
+    slideAbortControllerRef.current = controller;
     setIsAskingSlide(true);
     setStreamLiveAnswer('');
     setStreamLiveThinking('');
@@ -450,6 +461,7 @@ export const EnhancedSlideRenderer: React.FC<EnhancedSlideRendererProps> = ({
         images: processedUris.length > 0 ? processedUris : undefined,
         language,
         audienceMode,
+        signal: controller.signal,
         onStreamChunk: (payload) => {
           if (payload.text) setStreamLiveAnswer(payload.text);
           if (payload.thinking) setStreamLiveThinking(payload.thinking);
@@ -464,6 +476,10 @@ export const EnhancedSlideRenderer: React.FC<EnhancedSlideRendererProps> = ({
       setStreamLiveThinking('');
       setShowSlideChat(true);
     } catch (e: any) {
+      if (isAbortError(e)) {
+        toast({ title: 'Cancelled', description: 'Slide inquiry was stopped by user.' });
+        return;
+      }
       console.error('Slide Q&A error:', e);
       toast({
         title: 'Slide Q&A Error',
@@ -472,6 +488,7 @@ export const EnhancedSlideRenderer: React.FC<EnhancedSlideRendererProps> = ({
       });
     } finally {
       setIsAskingSlide(false);
+      slideAbortControllerRef.current = null;
     }
   };
 
@@ -719,9 +736,22 @@ export const EnhancedSlideRenderer: React.FC<EnhancedSlideRendererProps> = ({
                 {/* Active Streaming or Loading State */}
                 {isAskingSlide && (
                   <div className="rounded-lg bg-card/80 p-3 space-y-2 border border-primary/40 shadow-2xs animate-in fade-in">
-                    <div className="flex items-center gap-2 text-primary text-xs font-semibold">
-                      <Loader2 className="h-3.5 w-3.5 animate-spin text-primary shrink-0" />
-                      <span>Synthesizing Bedside Teaching Rationale...</span>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 text-primary text-xs font-semibold">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin text-primary shrink-0" />
+                        <span>Synthesizing Bedside Teaching Rationale...</span>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="destructive"
+                        size="sm"
+                        onClick={handleStopSlideQuestion}
+                        className="h-6 text-[11px] px-2 font-semibold gap-1 shrink-0 shadow-2xs"
+                        title="Stop slide question"
+                      >
+                        <Square className="h-3 w-3 fill-current" />
+                        <span>Stop</span>
+                      </Button>
                     </div>
 
                     {streamLiveThinking && (
@@ -787,18 +817,32 @@ export const EnhancedSlideRenderer: React.FC<EnhancedSlideRendererProps> = ({
                     value={slideQuestion}
                     onChange={(e) => setSlideQuestion(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter') handleAskSlideQuestion();
+                      if (e.key === 'Enter' && !isAskingSlide) handleAskSlideQuestion();
                     }}
                     className="h-8 text-xs bg-background border-border text-foreground placeholder:text-muted-foreground flex-1 min-w-0"
                   />
-                  <Button
-                    size="sm"
-                    onClick={() => handleAskSlideQuestion()}
-                    disabled={isAskingSlide || (!slideQuestion.trim() && attachedFiles.length === 0)}
-                    className="h-8 text-xs shrink-0 px-3 font-semibold"
-                  >
-                    Send
-                  </Button>
+                  {isAskingSlide ? (
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      onClick={handleStopSlideQuestion}
+                      className="h-8 text-xs shrink-0 px-3 font-semibold gap-1 shadow-2xs"
+                      title="Stop inquiry"
+                    >
+                      <Square className="h-3.5 w-3.5 fill-current" />
+                      <span>Stop</span>
+                    </Button>
+                  ) : (
+                    <Button
+                      size="sm"
+                      onClick={() => handleAskSlideQuestion()}
+                      disabled={!slideQuestion.trim() && attachedFiles.length === 0}
+                      className="h-8 text-xs shrink-0 px-3 font-semibold"
+                    >
+                      Send
+                    </Button>
+                  )}
                 </div>
               </div>
             </motion.div>

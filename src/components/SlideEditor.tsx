@@ -54,6 +54,7 @@ import {
   ChevronLeft,
   ChevronRight,
   X,
+  Square,
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { Label } from './ui/label';
@@ -64,7 +65,7 @@ import EnhancedSlideRenderer from './EnhancedSlideRenderer';
 import { registerNotoSansBold } from '@/lib/pdf-fonts/NotoSansBold';
 import { registerNotoSansItalic } from '@/lib/pdf-fonts/NotoSansItalic';
 import { useSettings } from '@/context/SettingsContext';
-import { ClientSideAiService } from '@/lib/ClientSideAiService';
+import { ClientSideAiService, isAbortError } from '@/lib/ClientSideAiService';
 import { generatePptx } from '@/lib/ppt-generator';
 import PptxGenJS from 'pptxgenjs';
 
@@ -134,8 +135,16 @@ export function SlideEditor({
   const [isSuggestingTopics, setIsSuggestingTopics] = useState(false);
   const [isPresenting, setIsPresenting] = useState(false);
   const [presentingIndex, setPresentingIndex] = useState(0);
+  const slideModifyAbortRef = React.useRef<AbortController | null>(null);
   const { toast } = useToast();
   const { apiKey, aiConfig, isConfigured, language, audienceMode } = useSettings();
+
+  const handleStopSlideModify = () => {
+    if (slideModifyAbortRef.current) {
+      slideModifyAbortRef.current.abort();
+      slideModifyAbortRef.current = null;
+    }
+  };
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -201,6 +210,8 @@ export function SlideEditor({
 
   const handleModifySlides = async (action: 'replace_content' | 'expand_selected') => {
     if (!isConfigured || selectedIndices.length === 0) return;
+    const controller = new AbortController();
+    slideModifyAbortRef.current = controller;
     setIsModifying(true);
     const indicesSet = new Set(selectedIndices);
     setLoadingSlides(indicesSet);
@@ -212,6 +223,7 @@ export function SlideEditor({
         action,
         language,
         audienceMode,
+        signal: controller.signal,
       });
 
       setSlides(updatedSlides);
@@ -221,6 +233,10 @@ export function SlideEditor({
         description: `Successfully modified ${selectedIndices.length} slides.`,
       });
     } catch (error: any) {
+      if (isAbortError(error)) {
+        toast({ title: 'Cancelled', description: 'Slide modification stopped by user.' });
+        return;
+      }
       console.error('Failed to modify slides:', error);
       toast({
         title: 'Failed to Modify Slides',
@@ -230,11 +246,14 @@ export function SlideEditor({
     } finally {
       setIsModifying(false);
       setLoadingSlides(new Set());
+      slideModifyAbortRef.current = null;
     }
   };
 
   const handleModifySingleSlide = async (slideIndex: number, action: 'replace_content' | 'expand_selected') => {
     if (!isConfigured) return;
+    const controller = new AbortController();
+    slideModifyAbortRef.current = controller;
     setIsModifying(true);
     setLoadingSlides(new Set([slideIndex]));
 
@@ -245,6 +264,7 @@ export function SlideEditor({
         action,
         language,
         audienceMode,
+        signal: controller.signal,
       });
 
       setSlides(updatedSlides);
@@ -254,6 +274,10 @@ export function SlideEditor({
         description: `Successfully updated slide: ${slides[slideIndex]?.title || `#${slideIndex + 1}`}`,
       });
     } catch (error: any) {
+      if (isAbortError(error)) {
+        toast({ title: 'Cancelled', description: 'Slide modification stopped by user.' });
+        return;
+      }
       console.error('Failed to modify slide:', error);
       toast({
         title: 'Failed to Modify Slide',
@@ -263,6 +287,7 @@ export function SlideEditor({
     } finally {
       setIsModifying(false);
       setLoadingSlides(new Set());
+      slideModifyAbortRef.current = null;
     }
   };
 
@@ -817,31 +842,46 @@ export function SlideEditor({
             {selectedIndices.length > 0 && (
               <div className="flex flex-wrap items-center gap-2">
                 {isModifying && (
-                  <span className="flex items-center gap-1.5 text-xs text-primary font-bold animate-pulse px-2 py-0.5 rounded-md bg-primary/10 border border-primary/20">
-                    <Loader2 className="h-3 w-3 animate-spin text-primary" />
-                    <span>Enriching {selectedIndices.length} slide{selectedIndices.length > 1 ? 's' : ''}...</span>
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="flex items-center gap-1.5 text-xs text-primary font-bold animate-pulse px-2 py-0.5 rounded-md bg-primary/10 border border-primary/20">
+                      <Loader2 className="h-3 w-3 animate-spin text-primary" />
+                      <span>Enriching {selectedIndices.length} slide{selectedIndices.length > 1 ? 's' : ''}...</span>
+                    </span>
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      onClick={handleStopSlideModify}
+                      className="h-7 text-xs font-semibold gap-1.5 shadow-2xs"
+                      title="Stop slide enrichment"
+                    >
+                      <Square className="h-3 w-3 fill-current" />
+                      <span>Stop</span>
+                    </Button>
+                  </div>
                 )}
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => handleModifySlides('replace_content')}
-                  disabled={isModifying}
-                  className="h-7 text-xs font-semibold gap-1.5 bg-blue-500/10 hover:bg-blue-500/20 text-blue-700 dark:text-blue-300 border-blue-500/40 shadow-2xs"
-                >
-                  <RefreshCw className={cn("h-3 w-3 text-blue-600 dark:text-blue-400", isModifying && "animate-spin")} />
-                  <span>Regenerate Selected ({selectedIndices.length})</span>
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => handleModifySlides('expand_selected')}
-                  disabled={isModifying}
-                  className="h-7 text-xs font-semibold gap-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border-emerald-500/40 shadow-2xs"
-                >
-                  <Scaling className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
-                  <span>Expand Depth ({selectedIndices.length})</span>
-                </Button>
+                {!isModifying && (
+                  <>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleModifySlides('replace_content')}
+                      className="h-7 text-xs font-semibold gap-1.5 bg-blue-500/10 hover:bg-blue-500/20 text-blue-700 dark:text-blue-300 border-blue-500/40 shadow-2xs"
+                    >
+                      <RefreshCw className="h-3 w-3 text-blue-600 dark:text-blue-400" />
+                      <span>Regenerate Selected ({selectedIndices.length})</span>
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleModifySlides('expand_selected')}
+                      className="h-7 text-xs font-semibold gap-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border-emerald-500/40 shadow-2xs"
+                    >
+                      <Scaling className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
+                      <span>Expand Depth ({selectedIndices.length})</span>
+                    </Button>
+                  </>
+                )}
               </div>
             )}
           </div>
