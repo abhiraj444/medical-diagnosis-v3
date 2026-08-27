@@ -339,7 +339,7 @@ export async function POST(req: NextRequest) {
       '';
 
     if (geminiKey) {
-      const transcribeModels = ['gemini-2.5-flash', 'gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-1.5-flash'];
+      const transcribeModels = ['gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite'];
       const ai = new GoogleGenAI({
         apiKey: geminiKey,
         httpOptions: {

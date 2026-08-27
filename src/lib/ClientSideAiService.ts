@@ -517,12 +517,11 @@ export async function executeAiPrompt(
     const requestedModel = config.geminiModel || DEFAULT_GEMINI_MODEL;
     const fallbackModels = [
         requestedModel,
-        'gemini-3.6-flash',
-        'gemini-2.5-flash',
         'gemini-3.7-flash',
+        'gemini-3.6-flash',
+        'gemini-3.5-flash',
         'gemini-3.1-flash-lite',
-        'gemini-1.5-flash',
-        'gemini-2.0-flash',
+        'gemini-3.1-pro-preview',
     ].filter((v, i, a) => a.indexOf(v) === i);
 
     const genAI = new GoogleGenerativeAI(apiKey);

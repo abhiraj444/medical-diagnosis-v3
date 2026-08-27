@@ -40,14 +40,20 @@ const GEMINI_MODEL_PRESETS = [
   {
     id: 'gemini-3.7-flash',
     label: 'gemini-3.7-flash',
-    tag: 'Latest Reasoning',
-    desc: 'Cutting-edge reasoning and clinical accuracy with automatic backend fallback to 3.6/2.5 flash.',
+    tag: 'Latest & Recommended',
+    desc: 'Cutting-edge reasoning and clinical accuracy with automatic fallback support.',
   },
   {
     id: 'gemini-3.6-flash',
     label: 'gemini-3.6-flash',
     tag: 'Ultra-Stable & Fast',
     desc: 'Highly reliable flash model for direct, uninterrupted medical and slide analysis.',
+  },
+  {
+    id: 'gemini-3.5-flash',
+    label: 'gemini-3.5-flash',
+    tag: 'High Performance',
+    desc: 'Fast, responsive generation optimized for general medical workflows and slides.',
   },
   {
     id: 'gemini-3.1-pro-preview',
@@ -60,12 +66,6 @@ const GEMINI_MODEL_PRESETS = [
     label: 'gemini-3.1-flash-lite',
     tag: 'Ultra-Fast',
     desc: 'Instant slide generation and lightweight clinical lookups.',
-  },
-  {
-    id: 'gemini-2.5-flash',
-    label: 'gemini-2.5-flash',
-    tag: 'Standard Flash',
-    desc: 'Stable general flash generation model.',
   },
 ];
 
@@ -142,7 +142,7 @@ const STT_PROVIDER_PRESETS: Array<{
     id: 'gemini',
     name: 'Google Gemini Audio Fallback',
     endpoint: '',
-    defaultModel: 'gemini-2.5-flash',
+    defaultModel: 'gemini-3.7-flash',
     desc: 'Direct multimodal audio transcription using your Gemini API key.',
   },
 ];
