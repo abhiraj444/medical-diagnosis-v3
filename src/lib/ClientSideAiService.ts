@@ -15,6 +15,40 @@ export const DEFAULT_GEMINI_MODEL = 'gemini-3.7-flash';
 export const DEFAULT_STT_MODEL = 'whisper-large-v3-turbo';
 
 /**
+ * Formats model identifiers into clean, human-readable display names across all providers.
+ */
+export function formatModelDisplayName(modelName?: string): string {
+    if (!modelName) return 'Gemini 3.7 Flash';
+    const trimmed = modelName.trim();
+    const lower = trimmed.toLowerCase();
+
+    if (lower.includes('3.7-flash')) return 'Gemini 3.7 Flash';
+    if (lower.includes('2.5-flash')) return 'Gemini 2.5 Flash';
+    if (lower.includes('3.6-flash')) return 'Gemini 3.6 Flash';
+    if (lower.includes('3.1-flash-lite')) return 'Gemini 3.1 Flash Lite';
+    if (lower.includes('1.5-pro')) return 'Gemini 1.5 Pro';
+    if (lower.includes('1.5-flash')) return 'Gemini 1.5 Flash';
+    if (lower.includes('2.0-flash')) return 'Gemini 2.0 Flash';
+    if (lower.includes('gpt-4o-mini')) return 'GPT-4o Mini';
+    if (lower.includes('gpt-4o')) return 'GPT-4o';
+    if (lower.includes('gpt-oss-120b') || lower.includes('gptoss120b')) return 'GPT-OSS 120B (Text Only)';
+    if (lower.includes('claude-3-7') || lower.includes('claude-3.7')) return 'Claude 3.7 Sonnet';
+    if (lower.includes('claude-3-5') || lower.includes('claude-3.5')) return 'Claude 3.5 Sonnet';
+    if (lower.includes('llama-3.3-70b')) return 'Llama 3.3 70B';
+    if (lower.includes('llama-3.2-11b') || lower.includes('llama-3.2-90b')) return 'Llama 3.2 Vision';
+    if (lower.includes('deepseek-r1') || lower.includes('deepseek-reasoner')) return 'DeepSeek R1';
+    if (lower.includes('deepseek-chat') || lower.includes('deepseek-v3')) return 'DeepSeek V3';
+    if (lower.includes('qwen-2.5') || lower.includes('qwen2.5')) return 'Qwen 2.5';
+
+    if (trimmed.includes('/')) {
+        const afterSlash = trimmed.split('/')[1] || trimmed;
+        return afterSlash.toUpperCase();
+    }
+
+    return trimmed;
+}
+
+/**
  * Resolves full AI configuration either from an AiConfig object, a raw API key string,
  * or persistent localStorage preferences.
  */
@@ -452,10 +486,14 @@ export async function executeAiPrompt(
                 errLower.includes('only text') ||
                 errLower.includes('vision') ||
                 errLower.includes('must be a string') ||
-                errLower.includes('unprocessable')
+                errLower.includes('unprocessable') ||
+                errLower.includes('gptoss120b') ||
+                errLower.includes('gpt-oss-120b') ||
+                errLower.includes('image_url') ||
+                errLower.includes('no image')
             ) {
                 hint =
-                    ' Tip: This model does not support image inputs. Try selecting a vision-capable model (e.g. Gemini 3.7 Flash, Llama 3.2 Vision, or GPT-4o) in Settings to analyze medical images.';
+                    ' Tip: The selected model (such as gpt-oss-120b) is strictly a text-only model on OpenRouter and does not support image inputs. To analyze medical photos or lab reports, please select a multimodal vision model (such as Gemini 3.7 Flash, GPT-4o, Claude 3.7 Sonnet, or Llama 3.2 Vision) in Settings.';
             }
             throw new Error(`Custom AI Endpoint Error (${res.status}): ${parsed.slice(0, 300)}${hint}`);
         }
@@ -1080,7 +1118,6 @@ ${patientData ? `\nPatient Data & Clinical Notes:\n${patientData}` : ''}
         apiKeyOrConfig: string | AiConfig,
         params: {
             originalQuestion?: string;
-            caseSummary?: string;
             originalAnswer?: string;
             diagnosesSummary?: string;
             userFollowUp: string;
@@ -1105,11 +1142,10 @@ ${getLanguageDirective(language)}
 
 ${getAudienceDirective(audienceMode)}
 
-**Original Case Context & Patient Data:**
+**Original Case Context:**
 - Clinical Notes / Question: ${params.originalQuestion || 'N/A'}
-${params.caseSummary ? `- Case Summary & Lab Synthesis: ${params.caseSummary}` : ''}
-- Primary Diagnoses / Probabilities: ${params.diagnosesSummary || 'N/A'}
-- Initial Clinical Analysis: ${params.originalAnswer || 'N/A'}
+- Primary Diagnoses / Summary: ${params.diagnosesSummary || 'N/A'}
+- Initial Analysis: ${params.originalAnswer || 'N/A'}
 
 ${
     params.conversationHistory && params.conversationHistory.length > 0
@@ -1153,8 +1189,6 @@ ${
             slideTitle: string;
             slideContent: any;
             slideSummary?: string;
-            caseContext?: string;
-            diagnosesSummary?: string;
             userQuestion: string;
             images?: string[];
             language?: TargetLanguage;
@@ -1170,7 +1204,7 @@ ${
         const audienceMode = params.audienceMode || 'doctor';
 
         const prompt = `
-You are an expert Medical Educator and Clinical Consultant explaining a specific presentation slide.
+You are an expert Medical Educator explaining a specific presentation slide.
 
 ${getLanguageDirective(language)}
 
@@ -1178,21 +1212,19 @@ ${getAudienceDirective(audienceMode)}
 
 **Presentation Main Topic:** ${params.presentationTopic}
 **Current Slide Title:** ${params.slideTitle}
-${params.slideSummary ? `**Slide Summary:** ${params.slideSummary}` : ''}
-${params.caseContext ? `**Underlying Patient Case & Clinical Summary:**\n${params.caseContext}` : ''}
-${params.diagnosesSummary ? `**Predicted Primary Diagnoses / Differentials:** ${params.diagnosesSummary}` : ''}
 **Slide Content:** ${JSON.stringify(params.slideContent)}
+${params.slideSummary ? `**Slide Summary:** ${params.slideSummary}` : ''}
 
 **User's Question on this Slide:**
 "${params.userQuestion}"
 
 **Instructions:**
-1. Provide a clear, engaging, and medically precise answer grounded in this slide's domain and any provided patient/case context in the chosen language and audience style. If images/documents are attached, analyze them in this context.
-2. If in Simplified mode, explain the core concept from first principles with vivid analogies. If in Doctor mode, connect concepts to clinical practice, pathophysiology, diagnostic criteria, and board exam pearls.
+1. Provide a clear, engaging answer specific to this slide's domain in the chosen language and audience style. If images/documents are attached, analyze them in this context.
+2. If in Simplified mode, explain the core concept from first principles with vivid analogies. If in Doctor mode, connect concepts to clinical practice, pathophysiology, and board exam pearls.
 3. Output valid JSON:
 {
-  "answer": "Detailed answer explaining the concept with clear formatting and bold key takeaways.",
-  "reasoning": "Deeper mechanism / biological and clinical rationale.",
+  "answer": "Detailed answer explaining the concept with clear formatting.",
+  "reasoning": "Deeper mechanism / biological context.",
   "clinicalPearls": [
     "${audienceMode === 'simplified' ? 'Fascinating first-principle insight 1' : 'High-yield clinical pearl 1'}",
     "${audienceMode === 'simplified' ? 'Fascinating first-principle insight 2' : 'High-yield clinical pearl 2'}"
@@ -1431,14 +1463,14 @@ Produce ONLY the JSON array.
         options?: {
             language?: TargetLanguage;
             audienceMode?: AudienceMode;
-            onOutlineReady?: (outline: string[]) => void;
             onStreamChunk?: (payload: StreamChunkCallbackPayload) => void;
+            onOutlineReady?: (outline: string[]) => void;
         }
     ): Promise<{ outline: string[]; slides: Slide[] }> {
         const language = options?.language || 'english';
         const audienceMode = options?.audienceMode || 'doctor';
 
-        // Step 1: Generate outline
+        // Step 1: Generate outline with streaming
         const outlineData = await this.generatePresentationOutline(apiKeyOrConfig, {
             topic: topic,
             question: caseSummary,
@@ -1450,10 +1482,10 @@ Produce ONLY the JSON array.
 
         const selectedTopics = outlineData.outline.slice(0, 10);
         if (options?.onOutlineReady) {
-            options.onOutlineReady(selectedTopics);
+            options.onOutlineReady(outlineData.outline);
         }
 
-        // Step 2: Generate slide content using only compact text context
+        // Step 2: Generate slide content using only compact text context with live streaming
         const slides = await this.generateSlideContent(apiKeyOrConfig, {
             topic: topic,
             selectedTopics: selectedTopics,
@@ -1766,4 +1798,8 @@ ${JSON.stringify(
 
         return mergedSlides;
     },
+    formatModelDisplayName,
+    resolveAiConfig,
 };
+
+export default ClientSideAiService;
