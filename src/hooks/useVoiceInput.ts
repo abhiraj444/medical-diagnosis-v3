@@ -61,31 +61,33 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}) {
     };
 
     recognition.onresult = (event: any) => {
-      let finalSegment = '';
-      let interimSegment = '';
+      let newlyFinalizedChunk = '';
+      let currentInterim = '';
 
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const item = event.results[i];
-        const piece = item[0].transcript;
+        const piece = item[0]?.transcript || '';
         if (item.isFinal) {
-          finalSegment += piece;
+          newlyFinalizedChunk += piece;
         } else {
-          interimSegment += piece;
+          currentInterim += piece;
         }
       }
 
-      if (finalSegment) {
-        const trimmed = finalSegment.trim();
-        accumulatedTextRef.current = accumulatedTextRef.current
-          ? `${accumulatedTextRef.current} ${trimmed}`
-          : trimmed;
-        setTranscript(accumulatedTextRef.current);
-        setInterimText('');
-        const words = trimmed.split(/\s+/).filter(Boolean).length;
-        currentSessionWordsRef.current += words;
-        onResultRef.current?.(trimmed);
-      } else if (interimSegment) {
-        setInterimText(interimSegment);
+      if (newlyFinalizedChunk) {
+        const trimmed = newlyFinalizedChunk.trim();
+        if (trimmed) {
+          accumulatedTextRef.current = accumulatedTextRef.current
+            ? `${accumulatedTextRef.current} ${trimmed}`
+            : trimmed;
+          setTranscript(accumulatedTextRef.current);
+          setInterimText('');
+          const words = trimmed.split(/\s+/).filter(Boolean).length;
+          currentSessionWordsRef.current += words;
+          onResultRef.current?.(trimmed);
+        }
+      } else if (currentInterim) {
+        setInterimText(currentInterim.trim());
       }
     };
 

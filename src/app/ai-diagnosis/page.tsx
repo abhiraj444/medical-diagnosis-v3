@@ -36,7 +36,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { useSettings } from '@/context/SettingsContext';
 import { ModeLanguageSelector } from '@/components/ModeLanguageSelector';
 import { LocalDataService, type LocalCase } from '@/lib/LocalDataService';
-import { ClientSideAiService } from '@/lib/ClientSideAiService';
+import { ClientSideAiService, extractProgressiveDiagnosis } from '@/lib/ClientSideAiService';
 import { convertPdfToImages, isPdfFile } from '@/lib/pdf-to-images';
 import { compressImagesForAi, prepareImagesForAiPrompt } from '@/lib/image-compressor';
 import { ImageCompressionOption } from '@/components/ImageCompressionOption';
@@ -70,6 +70,7 @@ function AiDiagnosisContent() {
   const [files, setFiles] = useState<File[]>([]);
   const [filePreviews, setFilePreviews] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingCase, setIsLoadingCase] = useState(false);
   const [isAnalyzingReport, setIsAnalyzingReport] = useState(false);
   const [isConvertingPdf, setIsConvertingPdf] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
@@ -127,6 +128,7 @@ function AiDiagnosisContent() {
     if (caseId && user && loadedCaseIdRef.current !== caseId) {
       loadedCaseIdRef.current = caseId;
       const loadCase = async () => {
+        setIsLoadingCase(true);
         setIsLoading(true);
         try {
           const caseData = await LocalDataService.getCase(caseId);
@@ -166,6 +168,7 @@ function AiDiagnosisContent() {
           toast({ title: 'Error', description: 'Failed to load case.', variant: 'destructive' });
         } finally {
           setIsLoading(false);
+          setIsLoadingCase(false);
         }
       };
       loadCase();
@@ -448,7 +451,7 @@ function AiDiagnosisContent() {
         mergeTargetKb: mergeTargetKb || 150,
       });
 
-      // Single comprehensive clinical call with streaming callbacks & robust parsing
+      // Single comprehensive clinical call with progressive live streaming & robust parsing
       const analysis = await ClientSideAiService.generateComprehensiveDiagnosis(
         aiConfig,
         patientData.trim() || undefined,
@@ -458,7 +461,26 @@ function AiDiagnosisContent() {
           audienceMode,
           callbacks: {
             onThoughtChunk: (_chunk, fullThought) => setStreamingThought(fullThought),
-            onTextChunk: (_chunk, fullText) => setStreamingText(fullText),
+            onTextChunk: (_chunk, fullText) => {
+              setStreamingText(fullText);
+              // Progressively extract completed diagnoses, clinical synthesis and questions
+              const progressive = extractProgressiveDiagnosis(fullText);
+              if (progressive.diagnoses && progressive.diagnoses.length > 0) {
+                setResults(progressive.diagnoses);
+              }
+              if (progressive.clinicalAnswer && progressive.clinicalAnswer.answer) {
+                setClinicalAnswer(progressive.clinicalAnswer as ClinicalAnswerData);
+              }
+              if (progressive.proactiveQuestions && progressive.proactiveQuestions.length > 0) {
+                setProactiveQuestions(progressive.proactiveQuestions);
+              }
+              if (progressive.reportKnowledge) {
+                setReportKnowledge(progressive.reportKnowledge);
+              }
+              if (progressive.caseSummaryForPresentation) {
+                setCaseSummaryForPresentation(progressive.caseSummaryForPresentation);
+              }
+            },
             onStatus: (msg) => setStreamingStatus(msg),
           },
         }
@@ -532,6 +554,7 @@ function AiDiagnosisContent() {
         aiConfig,
         {
           originalQuestion: patientData || structuredQuestion?.summary,
+          caseSummary: caseSummaryForPresentation,
           originalAnswer: clinicalAnswer?.answer,
           diagnosesSummary,
           userFollowUp: question,
@@ -851,7 +874,7 @@ function AiDiagnosisContent() {
                           <button
                             type="button"
                             onClick={() => handleRemoveFile(index)}
-                            className="absolute right-1 top-1 rounded-full bg-black/70 p-0.5 text-white hover:bg-black/90 transition-colors"
+                            className="absolute right-1 top-1 rounded-full bg-red-600 hover:bg-red-700 p-0.5 text-white shadow-xs transition-colors z-10"
                             aria-label="Remove image"
                           >
                             <X className="h-3 w-3" />
@@ -1053,29 +1076,48 @@ function AiDiagnosisContent() {
           {/* VIEW B: Differential Diagnoses & Clinical Synthesis */}
           {(activeOutputTab === 'diagnosis' || !reportKnowledge) && (
             <div className="space-y-6 w-full max-w-full">
+              {/* Case Loading Banner */}
+              {isLoadingCase && (
+                <Card className="border border-primary/20 bg-card p-6 shadow-xs flex flex-col items-center justify-center text-center space-y-3">
+                  <Loader2 className="h-8 w-8 animate-spin text-primary" />
+                  <div className="space-y-1">
+                    <p className="text-sm font-bold text-foreground">Case is being loaded...</p>
+                    <p className="text-xs text-muted-foreground">Retrieving differential diagnoses, lab parameters, and case data</p>
+                  </div>
+                </Card>
+              )}
+
               {/* Active Streaming Reasoning & Output Preview */}
-              {isLoading && (
+              {isLoading && !isLoadingCase && (
                 <div className="space-y-4">
+                  {/* Status Banner when no results have parsed yet */}
+                  {(!results || results.length === 0) && (
+                    <Card className="border border-primary/20 bg-card p-6 shadow-xs flex flex-col items-center justify-center text-center space-y-3">
+                      <Loader2 className="h-8 w-8 animate-spin text-primary" />
+                      <div className="space-y-1">
+                        <p className="text-sm font-bold text-foreground">Diagnosing in process...</p>
+                        <p className="text-xs text-muted-foreground">
+                          {PROGRESS_MESSAGES[progressStep] || 'Synthesizing clinical differential considerations and evidence...'}
+                        </p>
+                      </div>
+                    </Card>
+                  )}
+
+                  {/* Diagnosing In Process Banner when cards are already streaming */}
+                  {results && results.length > 0 && (
+                    <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 rounded-lg bg-primary/10 border border-primary/20 text-xs font-semibold text-primary">
+                      <div className="flex items-center gap-2">
+                        <Loader2 className="h-4 w-4 animate-spin shrink-0" />
+                        <span>Diagnosing in process...</span>
+                      </div>
+                      <span className="text-[11px] font-mono text-primary/80">
+                        {results.length} differential{results.length > 1 ? 's' : ''} parsed
+                      </span>
+                    </div>
+                  )}
+
                   {enableLiveThinking && streamingThought && (
                     <ClinicalThinkingBox thought={streamingThought} isStreaming={true} className="shadow-xs" />
-                  )}
-                  {enableStreamingOutput && streamingText && (
-                    <Card className="border border-primary/30 bg-primary/5 shadow-xs overflow-hidden">
-                      <CardHeader className="p-3.5 sm:p-4 bg-primary/10 border-b border-primary/20 flex flex-row items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                          <span className="text-xs font-bold text-primary uppercase tracking-wider">
-                            Live Clinical Stream
-                          </span>
-                        </div>
-                        <span className="text-[10px] font-mono text-muted-foreground">
-                          {streamingStatus || 'Streaming diagnosis...'}
-                        </span>
-                      </CardHeader>
-                      <CardContent className="p-4 sm:p-5 max-h-[350px] overflow-y-auto">
-                        <ClinicalMarkdownRenderer content={streamingText} className="text-xs sm:text-sm" />
-                      </CardContent>
-                    </Card>
                   )}
                 </div>
               )}

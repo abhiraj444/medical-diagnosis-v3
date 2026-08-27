@@ -113,7 +113,20 @@ export async function POST(req: NextRequest) {
 
       if (!upstreamRes.ok || !upstreamRes.body) {
         const errText = await upstreamRes.text().catch(() => 'Custom endpoint error');
-        return new Response(JSON.stringify({ error: `Custom endpoint error (${upstreamRes.status}): ${errText}` }), {
+        let errorMsg = `Custom endpoint error (${upstreamRes.status}): ${errText}`;
+        const errLower = errText.toLowerCase();
+        if (
+          errLower.includes('does not support image') ||
+          errLower.includes('only text') ||
+          errLower.includes('vision') ||
+          errLower.includes('must be a string') ||
+          errLower.includes('gptoss120b') ||
+          errLower.includes('gpt-oss-120b') ||
+          errLower.includes('unprocessable')
+        ) {
+          errorMsg = `The selected model (${payload.model}) does not support image inputs on OpenRouter. Please select a multimodal/vision model (such as Gemini 3.7 Flash, GPT-4o, Claude 3.7 Sonnet, or Llama 3.2 Vision) in Settings when uploading medical images.`;
+        }
+        return new Response(JSON.stringify({ error: errorMsg }), {
           status: upstreamRes.status >= 400 && upstreamRes.status < 600 ? upstreamRes.status : 500,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -137,7 +150,7 @@ export async function POST(req: NextRequest) {
                 const trimmed = line.trim();
                 if (!trimmed || !trimmed.startsWith('data:')) continue;
                 if (trimmed === 'data: [DONE]') {
-                  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`));
+                  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true, modelUsed: payload.model })}\n\n`));
                   continue;
                 }
                 try {
@@ -148,7 +161,7 @@ export async function POST(req: NextRequest) {
                   if (content || reasoning) {
                     controller.enqueue(
                       encoder.encode(
-                        `data: ${JSON.stringify({ text: content, thinking: reasoning })}\n\n`
+                        `data: ${JSON.stringify({ text: content, thinking: reasoning, modelUsed: payload.model })}\n\n`
                       )
                     );
                   }
@@ -157,7 +170,7 @@ export async function POST(req: NextRequest) {
                 }
               }
             }
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`));
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true, modelUsed: payload.model })}\n\n`));
             controller.close();
           } catch (err: any) {
             controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: err?.message || 'Stream error' })}\n\n`));

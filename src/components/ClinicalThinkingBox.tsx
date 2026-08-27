@@ -16,10 +16,13 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { useSettings } from '@/context/SettingsContext';
+import { formatModelDisplayName } from '@/lib/ClientSideAiService';
 
 export interface ClinicalThinkingBoxProps {
-  isLoading: boolean;
+  isLoading?: boolean;
+  isStreaming?: boolean;
   thinkingText?: string;
+  thought?: string;
   streamText?: string;
   currentStep?: string;
   steps?: string[];
@@ -34,7 +37,9 @@ export interface ClinicalThinkingBoxProps {
 
 export function ClinicalThinkingBox({
   isLoading,
+  isStreaming,
   thinkingText = '',
+  thought = '',
   streamText = '',
   currentStep = 'Clinical AI Co-Pilot reasoning in progress...',
   steps = [
@@ -43,23 +48,29 @@ export function ClinicalThinkingBox({
     'Synthesizing structured evidence & slide deck',
   ],
   activeStepIndex = 0,
-  modelName = 'Gemini 3.7 Flash Thinking',
+  modelName,
   title = 'AI Clinical Reasoning & Progress',
   defaultExpanded = true,
   className = '',
   showLiveThinking,
   showStreamingOutput,
 }: ClinicalThinkingBoxProps) {
-  const { enableStreamingOutput, enableLiveThinking } = useSettings();
+  const { enableStreamingOutput, enableLiveThinking, activeModel, aiConfig } = useSettings();
+  const effectiveLoading = isLoading !== undefined ? isLoading : (isStreaming !== undefined ? isStreaming : false);
+  const effectiveThinkingText = thinkingText || thought || '';
   const allowStreaming = showStreamingOutput !== undefined ? showStreamingOutput : enableStreamingOutput;
   const allowThinking = showLiveThinking !== undefined ? showLiveThinking : enableLiveThinking;
+
+  const effectiveModelName = modelName
+    ? formatModelDisplayName(modelName)
+    : formatModelDisplayName(activeModel || aiConfig?.customModel || aiConfig?.geminiModel);
 
   const [isExpanded, setIsExpanded] = useState(defaultExpanded);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
   useEffect(() => {
     let timer: NodeJS.Timeout | null = null;
-    if (isLoading) {
+    if (effectiveLoading) {
       setElapsedSeconds(0);
       timer = setInterval(() => {
         setElapsedSeconds((s) => s + 1);
@@ -68,10 +79,10 @@ export function ClinicalThinkingBox({
     return () => {
       if (timer) clearInterval(timer);
     };
-  }, [isLoading]);
+  }, [effectiveLoading]);
 
   // Don't render anything if not loading and no active output is requested
-  if (!isLoading && !thinkingText && !streamText) {
+  if (!effectiveLoading && !effectiveThinkingText && !streamText) {
     return null;
   }
 
@@ -90,7 +101,7 @@ export function ClinicalThinkingBox({
         <div className="flex items-center gap-2.5 min-w-0">
           <div
             className={`p-1.5 rounded-lg shrink-0 ${
-              isLoading
+              effectiveLoading
                 ? 'bg-primary/20 text-primary animate-pulse'
                 : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
             }`}
@@ -105,9 +116,9 @@ export function ClinicalThinkingBox({
                 variant="outline"
                 className="text-[10px] px-1.5 py-0 font-mono bg-background border-primary/20 text-primary shrink-0"
               >
-                {modelName}
+                {effectiveModelName}
               </Badge>
-              {isLoading && (
+              {effectiveLoading && (
                 <span className="inline-flex items-center gap-1 text-[10px] text-amber-600 dark:text-amber-400 font-medium animate-pulse">
                   <Activity className="h-3 w-3" />
                   Generating...
@@ -118,7 +129,7 @@ export function ClinicalThinkingBox({
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
-          {isLoading && (
+          {effectiveLoading && (
             <span className="text-[11px] font-mono text-muted-foreground flex items-center gap-1 bg-background/80 px-2 py-0.5 rounded-md border border-border">
               <Clock className="h-3 w-3 text-muted-foreground" />
               {formatElapsed(elapsedSeconds)}
@@ -148,8 +159,8 @@ export function ClinicalThinkingBox({
               </p>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 {steps.map((step, idx) => {
-                  const isDone = !isLoading || idx < activeStepIndex;
-                  const isCurrent = isLoading && idx === activeStepIndex;
+                  const isDone = !effectiveLoading || idx < activeStepIndex;
+                  const isCurrent = effectiveLoading && idx === activeStepIndex;
                   return (
                     <div
                       key={step}
@@ -177,7 +188,7 @@ export function ClinicalThinkingBox({
           )}
 
           {/* Current Live Stage Status */}
-          {isLoading && currentStep && (
+          {effectiveLoading && currentStep && (
             <div className="flex items-center gap-2 text-xs font-medium text-foreground bg-primary/5 p-2.5 rounded-xl border border-primary/15">
               <Sparkles className="h-4 w-4 text-primary shrink-0 animate-spin" />
               <span className="truncate">{currentStep}</span>
@@ -185,7 +196,7 @@ export function ClinicalThinkingBox({
           )}
 
           {/* Deep Thinking & Reasoning Log (when flag enabled) */}
-          {allowThinking && thinkingText && (
+          {allowThinking && effectiveThinkingText && (
             <div className="space-y-1.5">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
@@ -197,13 +208,13 @@ export function ClinicalThinkingBox({
                 </Badge>
               </div>
               <div className="p-3 rounded-xl bg-muted/40 border border-border/60 text-muted-foreground text-xs leading-relaxed max-h-48 overflow-y-auto font-mono whitespace-pre-wrap select-text">
-                {thinkingText}
+                {effectiveThinkingText}
               </div>
             </div>
           )}
 
-          {/* Live Content Stream Token Preview (when flag enabled) */}
-          {allowStreaming && streamText && (
+          {/* Live Content Stream Token Preview (when flag enabled and not raw slide JSON) */}
+          {allowStreaming && streamText && !streamText.trim().startsWith('[') && !streamText.trim().startsWith('```json\n[') && (
             <div className="space-y-1.5">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
@@ -216,7 +227,7 @@ export function ClinicalThinkingBox({
               </div>
               <div className="p-3 rounded-xl bg-background/80 border border-border/70 text-foreground text-xs leading-relaxed max-h-56 overflow-y-auto font-mono whitespace-pre-wrap select-text">
                 {streamText}
-                {isLoading && <span className="inline-block w-2 h-3.5 bg-primary ml-1 animate-pulse" />}
+                {effectiveLoading && <span className="inline-block w-2 h-3.5 bg-primary ml-1 animate-pulse" />}
               </div>
             </div>
           )}

@@ -428,7 +428,7 @@ export function FollowUpChat({
                   <button
                     type="button"
                     onClick={() => removeFile(idx)}
-                    className="absolute top-1 right-1 p-0.5 rounded-full bg-slate-900/80 text-white hover:bg-destructive transition-colors"
+                    className="absolute top-1 right-1 p-0.5 rounded-full bg-red-600 hover:bg-red-700 text-white shadow-xs transition-colors z-10"
                     aria-label="Remove image"
                   >
                     <X className="h-3 w-3" />

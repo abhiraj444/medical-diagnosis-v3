@@ -301,6 +301,8 @@ interface EnhancedSlideRendererProps {
   slide: Slide;
   index: number;
   presentationTopic?: string;
+  caseContext?: string;
+  diagnosesSummary?: string;
   isSelected?: boolean;
   isLoading?: boolean;
   onUpdateSlide?: (updatedSlide: Slide) => void;
@@ -310,6 +312,8 @@ export const EnhancedSlideRenderer: React.FC<EnhancedSlideRendererProps> = ({
   slide,
   index,
   presentationTopic = 'Medical Presentation',
+  caseContext,
+  diagnosesSummary,
   isSelected = false,
   isLoading = false,
   onUpdateSlide,
@@ -440,6 +444,8 @@ export const EnhancedSlideRenderer: React.FC<EnhancedSlideRendererProps> = ({
         slideTitle: slide.title,
         slideContent: slide.content,
         slideSummary: slide.summary,
+        caseContext,
+        diagnosesSummary,
         userQuestion: q,
         images: processedUris.length > 0 ? processedUris : undefined,
         language,
@@ -742,7 +748,7 @@ export const EnhancedSlideRenderer: React.FC<EnhancedSlideRendererProps> = ({
                         <button
                           type="button"
                           onClick={() => removeAttachedFile(idx)}
-                          className="absolute top-0.5 right-0.5 bg-black/70 hover:bg-black text-white rounded-full p-0.5"
+                          className="absolute top-0.5 right-0.5 bg-red-600 hover:bg-red-700 text-white rounded-full p-0.5 shadow-xs z-10"
                         >
                           <X className="h-2.5 w-2.5" />
                         </button>

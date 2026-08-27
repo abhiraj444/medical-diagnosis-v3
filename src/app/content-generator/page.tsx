@@ -31,7 +31,8 @@ import { useAuth } from '@/hooks/useAuth';
 import { useSettings } from '@/context/SettingsContext';
 import { ModeLanguageSelector } from '@/components/ModeLanguageSelector';
 import { LocalDataService, type LocalCase } from '@/lib/LocalDataService';
-import { ClientSideAiService } from '@/lib/ClientSideAiService';
+import { ClientSideAiService, formatModelDisplayName } from '@/lib/ClientSideAiService';
+import { extractProgressiveClinicalAnswer, extractProgressiveSlides } from '@/lib/streaming-parser';
 import type { StructuredQuestion, FollowUpThread } from '@/types';
 import { QuestionDisplay } from '@/components/QuestionDisplay';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -48,12 +49,30 @@ import { ClinicalMarkdownRenderer } from '@/components/ClinicalMarkdownRenderer'
 import Link from 'next/link';
 
 function ContentGeneratorContent() {
+  const {
+    apiKey,
+    aiConfig,
+    isConfigured,
+    activeModel,
+    language,
+    audienceMode,
+    compressImagesForAi: isCompressionEnabled,
+    setCompressImagesForAi,
+    targetImageKb,
+    setTargetImageKb,
+    mergeImagesIntoSingle,
+    setMergeImagesIntoSingle,
+    mergeTargetKb,
+    setMergeTargetKb,
+  } = useSettings();
+
   const [mode, setMode] = useState<'question' | 'topic'>('question');
   const [question, setQuestion] = useState('');
   const [imageFiles, setImageFiles] = useState<File[]>([]);
   const [imagePreviews, setImagePreviews] = useState<string[]>([]);
   const [topic, setTopic] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingCase, setIsLoadingCase] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [isAskingFollowUp, setIsAskingFollowUp] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -63,7 +82,13 @@ function ContentGeneratorContent() {
   const [streamText, setStreamText] = useState<string>('');
   const [streamStep, setStreamStep] = useState<string>('');
   const [activeStepIndex, setActiveStepIndex] = useState<number>(0);
-  const [streamModelName, setStreamModelName] = useState<string>('Gemini 3.7 Flash');
+  const [streamModelName, setStreamModelName] = useState<string>(() => formatModelDisplayName(activeModel));
+
+  useEffect(() => {
+    if (activeModel) {
+      setStreamModelName(formatModelDisplayName(activeModel));
+    }
+  }, [activeModel]);
 
   const [result, setResult] = useState<any | null>(null);
   const [proactiveQuestions, setProactiveQuestions] = useState<string[]>([]);
@@ -84,21 +109,6 @@ function ContentGeneratorContent() {
 
   const { toast } = useToast();
   const { user, loading: authLoading } = useAuth();
-  const {
-    apiKey,
-    aiConfig,
-    isConfigured,
-    language,
-    audienceMode,
-    compressImagesForAi: isCompressionEnabled,
-    setCompressImagesForAi,
-    targetImageKb,
-    setTargetImageKb,
-    mergeImagesIntoSingle,
-    setMergeImagesIntoSingle,
-    mergeTargetKb,
-    setMergeTargetKb,
-  } = useSettings();
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -117,6 +127,7 @@ function ContentGeneratorContent() {
     if (caseId && user && loadedCaseIdRef.current !== caseId) {
       loadedCaseIdRef.current = caseId;
       const loadCase = async () => {
+        setIsLoadingCase(true);
         setIsLoading(true);
         try {
           const caseData = await LocalDataService.getCase(caseId);
@@ -148,6 +159,7 @@ function ContentGeneratorContent() {
           toast({ title: 'Error', description: 'Failed to load case.', variant: 'destructive' });
         } finally {
           setIsLoading(false);
+          setIsLoadingCase(false);
         }
       };
       loadCase();
@@ -157,6 +169,12 @@ function ContentGeneratorContent() {
 
       const bridgeFromDiagnosis = async () => {
         setIsLoading(true);
+        setErrorMessage(null);
+        setStreamThinking('');
+        setStreamText('');
+        setStreamStep('Generating presentation outline from clinical diagnosis...');
+        setActiveStepIndex(0);
+
         try {
           const diagCase = await LocalDataService.getCase(fromCaseId);
           if (diagCase) {
@@ -165,20 +183,58 @@ function ContentGeneratorContent() {
             setTopic(diagTopic);
             setQuestion(diagSummary);
             setMode('topic');
+            setResult({
+              topic: diagTopic,
+              answer: `Teaching presentation generated directly from Diagnosis Case #${fromCaseId.slice(0, 6)}.`,
+            });
 
-            // Generate outline & slides directly using token-efficient bridge
+            // Generate outline & slides directly using token-efficient bridge with live streaming
             const bridgeResult = await ClientSideAiService.generatePresentationFromCaseSummary(
               aiConfig,
               diagSummary,
               diagTopic,
               diagCase.outputData?.clinicalAnswer?.answer,
-              { language, audienceMode }
+              {
+                language,
+                audienceMode,
+                onOutlineReady: (outline) => {
+                  setPresentationOutline(outline);
+                  setSelectedTopics(outline);
+                  setSuggestedTopics(outline);
+                  const placeholders = outline.slice(0, 10).map((t) => ({ title: t, content: [] }));
+                  setSlides(placeholders);
+                  setStreamStep('Synthesizing structured multi-slide presentation in real-time...');
+                  setActiveStepIndex(1);
+                },
+                onStreamChunk: (payload) => {
+                  if (payload.thinking) setStreamThinking(payload.thinking);
+                  if (payload.model) setStreamModelName(formatModelDisplayName(payload.model));
+                  if (payload.step) setStreamStep(payload.step);
+                  if (payload.text) {
+                    const progressiveSlides = extractProgressiveSlides(payload.text);
+                    if (progressiveSlides.length > 0) {
+                      setSlides((prev: Slide[] | null) => {
+                        if (!prev || prev.length === 0) return progressiveSlides;
+                        const next = [...prev];
+                        for (let i = 0; i < progressiveSlides.length; i++) {
+                          if (i < next.length) {
+                            next[i] = progressiveSlides[i];
+                          } else {
+                            next.push(progressiveSlides[i]);
+                          }
+                        }
+                        return next;
+                      });
+                    }
+                  }
+                },
+              }
             );
 
             setPresentationOutline(bridgeResult.outline);
             setSelectedTopics(bridgeResult.outline);
             setSlides(bridgeResult.slides);
-            setUsedTopics(bridgeResult.slides.map(s => s.title));
+            setUsedTopics(bridgeResult.slides.map((s) => s.title));
             setSuggestedTopics(bridgeResult.outline);
             setResult({
               topic: diagTopic,
@@ -200,7 +256,7 @@ function ContentGeneratorContent() {
                 slides: bridgeResult.slides,
                 outline: bridgeResult.outline,
                 selectedTopics: bridgeResult.outline,
-                usedTopics: bridgeResult.slides.map(s => s.title),
+                usedTopics: bridgeResult.slides.map((s) => s.title),
                 suggestedTopics: bridgeResult.outline,
                 followUpThreads: [],
               },
@@ -213,9 +269,11 @@ function ContentGeneratorContent() {
             router.replace(`/content-generator?caseId=${savedId}`);
             toast({ title: 'Presentation Ready', description: 'Generated slide deck from diagnosis summary.' });
           }
-        } catch (e) {
-          console.error('Bridge generation error:', e);
-          toast({ title: 'Error', description: 'Failed to bridge presentation.', variant: 'destructive' });
+        } catch (e: any) {
+          console.error('Failed to bridge from diagnosis:', e);
+          const msg = e?.message || 'Failed to generate presentation from case.';
+          setErrorMessage(msg);
+          toast({ title: 'Bridge Error', description: msg, variant: 'destructive' });
         } finally {
           setIsLoading(false);
         }
@@ -366,11 +424,55 @@ function ContentGeneratorContent() {
     });
   };
 
-  const handleStreamChunk = (payload: { thinking?: string; text?: string; step?: string; model?: string }) => {
+  const handleQuestionStreamChunk = (payload: { thinking?: string; text?: string; step?: string; model?: string }) => {
     if (payload.thinking) setStreamThinking(payload.thinking);
-    if (payload.text) setStreamText(payload.text);
+    if (payload.model) setStreamModelName(formatModelDisplayName(payload.model));
     if (payload.step) setStreamStep(payload.step);
-    if (payload.model) setStreamModelName(payload.model);
+    if (payload.text) {
+      setStreamText(payload.text);
+      const progressiveAnswer = extractProgressiveClinicalAnswer(payload.text);
+      if (progressiveAnswer.answer) {
+        setResult((prev: any) => ({
+          ...prev,
+          answer: progressiveAnswer.answer,
+          reasoning: progressiveAnswer.reasoning || prev?.reasoning,
+          topic: progressiveAnswer.topic || prev?.topic || 'Clinical Analysis',
+          keyTakeaways: progressiveAnswer.keyTakeaways.length > 0 ? progressiveAnswer.keyTakeaways : (prev?.keyTakeaways || []),
+        }));
+      }
+      if (progressiveAnswer.proactiveQuestions.length > 0) {
+        setProactiveQuestions(progressiveAnswer.proactiveQuestions);
+      }
+    }
+  };
+
+  const handleOutlineStreamChunk = (payload: { thinking?: string; text?: string; step?: string; model?: string }) => {
+    if (payload.thinking) setStreamThinking(payload.thinking);
+    if (payload.model) setStreamModelName(formatModelDisplayName(payload.model));
+    if (payload.step) setStreamStep(payload.step);
+  };
+
+  const handleSlideStreamChunk = (payload: { thinking?: string; text?: string; step?: string; model?: string }) => {
+    if (payload.thinking) setStreamThinking(payload.thinking);
+    if (payload.model) setStreamModelName(formatModelDisplayName(payload.model));
+    if (payload.step) setStreamStep(payload.step);
+    if (payload.text) {
+      const progressiveSlides = extractProgressiveSlides(payload.text);
+      if (progressiveSlides.length > 0) {
+        setSlides((prev: Slide[] | null) => {
+          if (!prev || prev.length === 0) return progressiveSlides;
+          const next = [...prev];
+          for (let i = 0; i < progressiveSlides.length; i++) {
+            if (i < next.length) {
+              next[i] = progressiveSlides[i];
+            } else {
+              next.push(progressiveSlides[i]);
+            }
+          }
+          return next;
+        });
+      }
+    }
   };
 
   const handleQuestionSubmit = async (event: React.FormEvent) => {
@@ -412,7 +514,7 @@ function ContentGeneratorContent() {
         ClientSideAiService.answerClinicalQuestion(aiConfig, question.trim() || undefined, imagesForAi, {
           language,
           audienceMode,
-          onStreamChunk: handleStreamChunk,
+          onStreamChunk: handleQuestionStreamChunk,
         }),
         ClientSideAiService.summarizeQuestion(aiConfig, question.trim() || undefined, imagesForAi, {
           language,
@@ -488,7 +590,7 @@ function ContentGeneratorContent() {
         topic: topic.trim(),
         language,
         audienceMode,
-        onStreamChunk: handleStreamChunk,
+        onStreamChunk: handleOutlineStreamChunk,
       });
       setPresentationOutline(data.outline);
       setSelectedTopics(data.outline);
@@ -549,7 +651,7 @@ function ContentGeneratorContent() {
         topic: result?.topic || topic,
         language,
         audienceMode,
-        onStreamChunk: handleStreamChunk,
+        onStreamChunk: handleOutlineStreamChunk,
       });
       setPresentationOutline(data.outline);
       setSelectedTopics(data.outline);
@@ -599,7 +701,7 @@ function ContentGeneratorContent() {
         caseSummaryForPresentation: question,
         language,
         audienceMode,
-        onStreamChunk: handleStreamChunk,
+        onStreamChunk: handleSlideStreamChunk,
       });
 
       setSlides(generatedSlides);
@@ -931,7 +1033,7 @@ function ContentGeneratorContent() {
                             <button
                               type="button"
                               onClick={() => handleRemoveImage(index)}
-                              className="absolute right-1 top-1 rounded-full bg-black/60 p-0.5 text-white hover:bg-black/80"
+                              className="absolute right-1 top-1 rounded-full bg-red-600 hover:bg-red-700 p-0.5 text-white shadow-xs transition-colors z-10"
                             >
                               <X className="h-3 w-3" />
                             </button>
@@ -1038,18 +1140,40 @@ function ContentGeneratorContent() {
         </Card>
       )}
 
+      {/* Case Loading State */}
+      {isLoadingCase && (
+        <Card className="border border-primary/20 bg-card p-6 shadow-xs flex flex-col items-center justify-center text-center space-y-3">
+          <Loader2 className="h-8 w-8 animate-spin text-primary" />
+          <div className="space-y-1">
+            <p className="text-sm font-bold text-foreground">Case is being loaded...</p>
+            <p className="text-xs text-muted-foreground">Retrieving clinical answer, presentation outline, and slide records</p>
+          </div>
+        </Card>
+      )}
+
       {/* Loading State with Real-Time Thinking & Streaming Process */}
-      {isLoading && !result && !slides && (
+      {isLoading && !isLoadingCase && !result && !slides && (
         <div className="space-y-4 py-2">
-          <ClinicalThinkingBox
-            isLoading={true}
-            thinkingText={streamThinking}
-            streamText={streamText}
-            currentStep={streamStep || 'Consultant AI analyzing clinical guidelines & generating content...'}
-            activeStepIndex={activeStepIndex}
-            modelName={streamModelName}
-            title="Clinical AI Live Reasoning & Evidence Synthesis"
-          />
+          <Card className="border border-primary/20 bg-card p-6 shadow-xs flex flex-col items-center justify-center text-center space-y-3">
+            <Loader2 className="h-8 w-8 animate-spin text-primary" />
+            <div className="space-y-1">
+              <p className="text-sm font-bold text-foreground">Content is getting generated...</p>
+              <p className="text-xs text-muted-foreground">
+                {streamStep || 'Consultant AI analyzing clinical guidelines & synthesizing content...'}
+              </p>
+            </div>
+          </Card>
+          {streamThinking && (
+            <ClinicalThinkingBox
+              isLoading={true}
+              thinkingText={streamThinking}
+              streamText={streamText}
+              currentStep={streamStep || 'Consultant AI analyzing clinical guidelines & generating content...'}
+              activeStepIndex={activeStepIndex}
+              modelName={streamModelName}
+              title="Clinical AI Live Reasoning & Evidence Synthesis"
+            />
+          )}
         </div>
       )}
 
@@ -1097,7 +1221,7 @@ function ContentGeneratorContent() {
                   <ClinicalThinkingBox
                     isLoading={true}
                     thinkingText={streamThinking}
-                    streamText={streamText}
+                    streamText={slides && slides.length > 0 ? '' : streamText}
                     currentStep={streamStep || 'Synthesizing postgraduate slides & structured evidence...'}
                     activeStepIndex={activeStepIndex}
                     modelName={streamModelName}

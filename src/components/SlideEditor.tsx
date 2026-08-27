@@ -944,6 +944,7 @@ export function SlideEditor({
                           slide={slide}
                           index={index}
                           presentationTopic={topic}
+                          caseContext={questionContext}
                           isSelected={selectedIndices.includes(index)}
                           isLoading={loadingSlides.has(index)}
                           onUpdateSlide={(updated) => handleUpdateSlide(index, updated)}
@@ -1091,7 +1092,8 @@ export function SlideEditor({
             <EnhancedSlideRenderer
               slide={slides[presentingIndex]}
               index={presentingIndex}
-              presentationTopic={slides[0]?.title || 'Presentation'}
+              presentationTopic={topic || slides[0]?.title || 'Presentation'}
+              caseContext={questionContext}
             />
           </div>
 

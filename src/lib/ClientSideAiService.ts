@@ -1,6 +1,15 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import type { DiagnosisItem, ClinicalAnswerData, Slide, FollowUpThread, AiConfig, SttConfig, ReportKnowledgeData } from '@/types';
 import type { TargetLanguage, AudienceMode } from '@/context/SettingsContext';
+import {
+    parseAiJson,
+    repairJsonString,
+    extractProgressiveDiagnosis,
+    extractProgressiveSlides,
+    extractProgressiveClinicalAnswer,
+} from '@/lib/streaming-parser';
+
+export { parseAiJson, repairJsonString, extractProgressiveDiagnosis, extractProgressiveSlides, extractProgressiveClinicalAnswer };
 
 export const DEFAULT_GEMINI_MODEL = 'gemini-3.7-flash';
 export const DEFAULT_STT_MODEL = 'whisper-large-v3-turbo';
@@ -647,38 +656,6 @@ export async function executeStreamingAiPrompt(
 }
 
 /**
- * Robust JSON extraction helper handling codeblocks and bracket extraction across LLMs.
- */
-export function parseAiJson<T>(rawText: string, fallback: T): T {
-    try {
-        const clean = rawText.trim();
-        return JSON.parse(clean);
-    } catch {
-        // Look for markdown code block ```json ... ```
-        const codeBlock = rawText.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-        if (codeBlock) {
-            try {
-                return JSON.parse(codeBlock[1].trim());
-            } catch {
-                // continue
-            }
-        }
-        // Look for bracket matches
-        const bracketMatch = rawText.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-        if (bracketMatch) {
-            try {
-                let jsonText = bracketMatch[0];
-                jsonText = jsonText.replace(/\\n/g, ' ').replace(/\\t/g, ' ');
-                return JSON.parse(jsonText);
-            } catch (e) {
-                console.error('Failed to parse matched JSON block:', e);
-            }
-        }
-    }
-    return fallback;
-}
-
-/**
  * Returns explicit prompt directives to strictly enforce the user's chosen output language,
  * regardless of the language or script used in the input (text, audio, documents, Hindi, etc.).
  */
@@ -908,6 +885,11 @@ ${patientData ? `\nPatient Notes & Data:\n${patientData}` : ''}
             language?: TargetLanguage;
             audienceMode?: AudienceMode;
             onStreamChunk?: (payload: StreamChunkCallbackPayload) => void;
+            callbacks?: {
+                onThoughtChunk?: (chunk: string, fullThought: string) => void;
+                onTextChunk?: (chunk: string, fullText: string) => void;
+                onStatus?: (status: string) => void;
+            };
         }
     ): Promise<{
         diagnoses: DiagnosisItem[];
@@ -916,6 +898,7 @@ ${patientData ? `\nPatient Notes & Data:\n${patientData}` : ''}
         proactiveQuestions: string[];
         caseSummaryForPresentation: string;
         reportKnowledge?: ReportKnowledgeData | null;
+        thinkingProcess?: string;
     }> {
         const language = options?.language || 'english';
         const audienceMode = options?.audienceMode || 'doctor';
@@ -1029,7 +1012,28 @@ Return a single, strictly valid JSON object matching this structure:
 ${patientData ? `\nPatient Data & Clinical Notes:\n${patientData}` : ''}
 `;
 
-        const text = await this._runPrompt(apiKeyOrConfig, prompt, images, options?.onStreamChunk);
+        let capturedThinking = '';
+        const chunkHandler = (payload: StreamChunkCallbackPayload) => {
+            if (payload.thinking) capturedThinking = payload.thinking;
+            if (options?.onStreamChunk) {
+                options.onStreamChunk(payload);
+            }
+            if (options?.callbacks) {
+                if (payload.thinking && options.callbacks.onThoughtChunk) {
+                    options.callbacks.onThoughtChunk(payload.thinking, payload.thinking);
+                }
+                if (payload.text && options.callbacks.onTextChunk) {
+                    options.callbacks.onTextChunk(payload.text, payload.text);
+                }
+            }
+        };
+
+        const text = await this._runPrompt(
+            apiKeyOrConfig,
+            prompt,
+            images,
+            options?.onStreamChunk || options?.callbacks ? chunkHandler : undefined
+        );
 
         const fallback = {
             diagnoses: [
@@ -1065,6 +1069,7 @@ ${patientData ? `\nPatient Data & Clinical Notes:\n${patientData}` : ''}
             caseSummaryForPresentation:
                 parsed.caseSummaryForPresentation || parsed.summary || patientData || 'Case study details',
             reportKnowledge: parsed.reportKnowledge && parsed.reportKnowledge.categories && parsed.reportKnowledge.categories.length > 0 ? parsed.reportKnowledge : null,
+            thinkingProcess: capturedThinking || undefined,
         };
     },
 
@@ -1075,6 +1080,7 @@ ${patientData ? `\nPatient Data & Clinical Notes:\n${patientData}` : ''}
         apiKeyOrConfig: string | AiConfig,
         params: {
             originalQuestion?: string;
+            caseSummary?: string;
             originalAnswer?: string;
             diagnosesSummary?: string;
             userFollowUp: string;
@@ -1099,10 +1105,11 @@ ${getLanguageDirective(language)}
 
 ${getAudienceDirective(audienceMode)}
 
-**Original Case Context:**
+**Original Case Context & Patient Data:**
 - Clinical Notes / Question: ${params.originalQuestion || 'N/A'}
-- Primary Diagnoses / Summary: ${params.diagnosesSummary || 'N/A'}
-- Initial Analysis: ${params.originalAnswer || 'N/A'}
+${params.caseSummary ? `- Case Summary & Lab Synthesis: ${params.caseSummary}` : ''}
+- Primary Diagnoses / Probabilities: ${params.diagnosesSummary || 'N/A'}
+- Initial Clinical Analysis: ${params.originalAnswer || 'N/A'}
 
 ${
     params.conversationHistory && params.conversationHistory.length > 0
@@ -1146,6 +1153,8 @@ ${
             slideTitle: string;
             slideContent: any;
             slideSummary?: string;
+            caseContext?: string;
+            diagnosesSummary?: string;
             userQuestion: string;
             images?: string[];
             language?: TargetLanguage;
@@ -1161,7 +1170,7 @@ ${
         const audienceMode = params.audienceMode || 'doctor';
 
         const prompt = `
-You are an expert Medical Educator explaining a specific presentation slide.
+You are an expert Medical Educator and Clinical Consultant explaining a specific presentation slide.
 
 ${getLanguageDirective(language)}
 
@@ -1169,19 +1178,21 @@ ${getAudienceDirective(audienceMode)}
 
 **Presentation Main Topic:** ${params.presentationTopic}
 **Current Slide Title:** ${params.slideTitle}
-**Slide Content:** ${JSON.stringify(params.slideContent)}
 ${params.slideSummary ? `**Slide Summary:** ${params.slideSummary}` : ''}
+${params.caseContext ? `**Underlying Patient Case & Clinical Summary:**\n${params.caseContext}` : ''}
+${params.diagnosesSummary ? `**Predicted Primary Diagnoses / Differentials:** ${params.diagnosesSummary}` : ''}
+**Slide Content:** ${JSON.stringify(params.slideContent)}
 
 **User's Question on this Slide:**
 "${params.userQuestion}"
 
 **Instructions:**
-1. Provide a clear, engaging answer specific to this slide's domain in the chosen language and audience style. If images/documents are attached, analyze them in this context.
-2. If in Simplified mode, explain the core concept from first principles with vivid analogies. If in Doctor mode, connect concepts to clinical practice, pathophysiology, and board exam pearls.
+1. Provide a clear, engaging, and medically precise answer grounded in this slide's domain and any provided patient/case context in the chosen language and audience style. If images/documents are attached, analyze them in this context.
+2. If in Simplified mode, explain the core concept from first principles with vivid analogies. If in Doctor mode, connect concepts to clinical practice, pathophysiology, diagnostic criteria, and board exam pearls.
 3. Output valid JSON:
 {
-  "answer": "Detailed answer explaining the concept with clear formatting.",
-  "reasoning": "Deeper mechanism / biological context.",
+  "answer": "Detailed answer explaining the concept with clear formatting and bold key takeaways.",
+  "reasoning": "Deeper mechanism / biological and clinical rationale.",
   "clinicalPearls": [
     "${audienceMode === 'simplified' ? 'Fascinating first-principle insight 1' : 'High-yield clinical pearl 1'}",
     "${audienceMode === 'simplified' ? 'Fascinating first-principle insight 2' : 'High-yield clinical pearl 2'}"
@@ -1420,6 +1431,8 @@ Produce ONLY the JSON array.
         options?: {
             language?: TargetLanguage;
             audienceMode?: AudienceMode;
+            onOutlineReady?: (outline: string[]) => void;
+            onStreamChunk?: (payload: StreamChunkCallbackPayload) => void;
         }
     ): Promise<{ outline: string[]; slides: Slide[] }> {
         const language = options?.language || 'english';
@@ -1432,9 +1445,13 @@ Produce ONLY the JSON array.
             answer: diagnosesText,
             language: language,
             audienceMode: audienceMode,
+            onStreamChunk: options?.onStreamChunk,
         });
 
         const selectedTopics = outlineData.outline.slice(0, 10);
+        if (options?.onOutlineReady) {
+            options.onOutlineReady(selectedTopics);
+        }
 
         // Step 2: Generate slide content using only compact text context
         const slides = await this.generateSlideContent(apiKeyOrConfig, {
@@ -1444,6 +1461,7 @@ Produce ONLY the JSON array.
             fullAnswer: diagnosesText,
             language: language,
             audienceMode: audienceMode,
+            onStreamChunk: options?.onStreamChunk,
         });
 
         return {
