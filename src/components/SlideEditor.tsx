@@ -65,9 +65,10 @@ import EnhancedSlideRenderer from './EnhancedSlideRenderer';
 import { registerNotoSansBold } from '@/lib/pdf-fonts/NotoSansBold';
 import { registerNotoSansItalic } from '@/lib/pdf-fonts/NotoSansItalic';
 import { useSettings } from '@/context/SettingsContext';
-import { ClientSideAiService, isAbortError } from '@/lib/ClientSideAiService';
+import { ClientSideAiService, isAbortError, formatModelDisplayName } from '@/lib/ClientSideAiService';
 import { generatePptx } from '@/lib/ppt-generator';
 import PptxGenJS from 'pptxgenjs';
+import { AiStreamingRawLogBox } from './AiStreamingRawLogBox';
 
 export type { Slide };
 
@@ -135,9 +136,13 @@ export function SlideEditor({
   const [isSuggestingTopics, setIsSuggestingTopics] = useState(false);
   const [isPresenting, setIsPresenting] = useState(false);
   const [presentingIndex, setPresentingIndex] = useState(0);
+  const [streamText, setStreamText] = useState('');
+  const [streamThinking, setStreamThinking] = useState('');
+  const [streamStep, setStreamStep] = useState('');
+  const [streamModelName, setStreamModelName] = useState<string | undefined>();
   const slideModifyAbortRef = React.useRef<AbortController | null>(null);
   const { toast } = useToast();
-  const { apiKey, aiConfig, isConfigured, language, audienceMode } = useSettings();
+  const { apiKey, aiConfig, isConfigured, language, audienceMode, activeModel } = useSettings();
 
   const handleStopSlideModify = () => {
     if (slideModifyAbortRef.current) {
@@ -213,6 +218,14 @@ export function SlideEditor({
     const controller = new AbortController();
     slideModifyAbortRef.current = controller;
     setIsModifying(true);
+    setStreamText('');
+    setStreamThinking('');
+    const slideNums = selectedIndices.map((i) => `#${i + 1}`).join(', ');
+    setStreamStep(
+      action === 'expand_selected'
+        ? `Expanding depth for slide(s) ${slideNums} with clinical comparison tables, pathophysiological mechanisms, and board pearls...`
+        : `Refreshing content for slide(s) ${slideNums} with structured clinical items and updated pearls...`
+    );
     const indicesSet = new Set(selectedIndices);
     setLoadingSlides(indicesSet);
 
@@ -224,13 +237,18 @@ export function SlideEditor({
         language,
         audienceMode,
         signal: controller.signal,
+        onStreamChunk: (payload) => {
+          if (payload.text !== undefined) setStreamText(payload.text);
+          if (payload.thinking !== undefined) setStreamThinking(payload.thinking);
+          if (payload.model) setStreamModelName(payload.model);
+        },
       });
 
       setSlides(updatedSlides);
       onUpdate({ slides: updatedSlides });
       toast({
-        title: 'Slides Updated',
-        description: `Successfully modified ${selectedIndices.length} slides.`,
+        title: action === 'expand_selected' ? 'Depth Expanded' : 'Slides Refreshed',
+        description: `Successfully modified ${selectedIndices.length} slide${selectedIndices.length > 1 ? 's' : ''}.`,
       });
     } catch (error: any) {
       if (isAbortError(error)) {
@@ -255,6 +273,14 @@ export function SlideEditor({
     const controller = new AbortController();
     slideModifyAbortRef.current = controller;
     setIsModifying(true);
+    setStreamText('');
+    setStreamThinking('');
+    const slideTitle = slides[slideIndex]?.title || `#${slideIndex + 1}`;
+    setStreamStep(
+      action === 'expand_selected'
+        ? `Expanding clinical depth for slide #${slideIndex + 1} (${slideTitle})...`
+        : `Refreshing structured content for slide #${slideIndex + 1} (${slideTitle})...`
+    );
     setLoadingSlides(new Set([slideIndex]));
 
     try {
@@ -265,6 +291,11 @@ export function SlideEditor({
         language,
         audienceMode,
         signal: controller.signal,
+        onStreamChunk: (payload) => {
+          if (payload.text !== undefined) setStreamText(payload.text);
+          if (payload.thinking !== undefined) setStreamThinking(payload.thinking);
+          if (payload.model) setStreamModelName(payload.model);
+        },
       });
 
       setSlides(updatedSlides);
@@ -885,6 +916,18 @@ export function SlideEditor({
               </div>
             )}
           </div>
+
+          {/* Collapsible Live AI Streaming & Raw Output Box */}
+          <AiStreamingRawLogBox
+            isLoading={isModifying || isSuggestingTopics}
+            streamText={streamText}
+            thinkingText={streamThinking}
+            currentStep={streamStep}
+            modelName={streamModelName || formatModelDisplayName(activeModel || aiConfig?.customModel || aiConfig?.geminiModel)}
+            onStop={handleStopSlideModify}
+            title="Slide AI Synthesis & Streaming Output"
+            className="mb-4"
+          />
 
           {/* Dnd Sortable Slide List */}
           <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>

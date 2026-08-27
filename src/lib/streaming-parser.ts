@@ -166,7 +166,7 @@ export function parseAiJson<T>(rawText: string, fallback: T): T {
 
 /**
  * Unwraps nested top-level keys if the caller expected an array or specific structure
- * (e.g., { slides: [...] } when caller expected [...])
+ * (e.g., { slides: [...] } when caller expected [...], or a single slide object when array is expected)
  */
 function unwrapExpected<T>(parsed: any, fallback: T): T {
   if (parsed === null || parsed === undefined) return fallback;
@@ -177,11 +177,26 @@ function unwrapExpected<T>(parsed: any, fallback: T): T {
     }
     if (typeof parsed === 'object') {
       if (Array.isArray(parsed.slides)) return parsed.slides as unknown as T;
+      if (Array.isArray(parsed.modifiedSlides)) return parsed.modifiedSlides as unknown as T;
+      if (Array.isArray(parsed.targetSlides)) return parsed.targetSlides as unknown as T;
       if (Array.isArray(parsed.diagnoses)) return parsed.diagnoses as unknown as T;
       if (Array.isArray(parsed.outline)) return parsed.outline as unknown as T;
       if (Array.isArray(parsed.topics)) return parsed.topics as unknown as T;
       if (Array.isArray(parsed.items)) return parsed.items as unknown as T;
       if (Array.isArray(parsed.data)) return parsed.data as unknown as T;
+      if (Array.isArray(parsed.result)) return parsed.result as unknown as T;
+      if (Array.isArray(parsed.response)) return parsed.response as unknown as T;
+
+      // Single slide or diagnosis object returned when array was expected
+      if (
+        parsed.title !== undefined ||
+        parsed.content !== undefined ||
+        parsed.summary !== undefined ||
+        parsed.diagnosis !== undefined ||
+        parsed.originalIndex !== undefined
+      ) {
+        return [parsed] as unknown as T;
+      }
     }
   }
 
@@ -405,25 +420,51 @@ export function extractProgressiveSlides(rawText: string): Slide[] {
 /**
  * Sanitizes slide content items to ensure valid schema
  */
-function sanitizeContentItems(items: any[]): ContentItem[] {
+export function sanitizeContentItems(items: any[]): ContentItem[] {
+  if (!Array.isArray(items)) {
+    if (typeof items === 'string' && items.trim()) {
+      return [{ type: 'paragraph', text: items.trim() }];
+    }
+    return [];
+  }
+
   const result: ContentItem[] = [];
 
   for (const item of items) {
-    if (!item || typeof item !== 'object') continue;
+    if (!item) continue;
 
-    if (item.type === 'paragraph' && item.text) {
+    // Handle raw string items in content array
+    if (typeof item === 'string') {
+      const trimmed = item.trim();
+      if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+        result.push({
+          type: 'bullet_list',
+          items: [{ text: trimmed.replace(/^[-*]\s+/, '') }],
+        });
+      } else {
+        result.push({
+          type: 'paragraph',
+          text: trimmed,
+        });
+      }
+      continue;
+    }
+
+    if (typeof item !== 'object') continue;
+
+    if (item.type === 'paragraph' && (item.text || item.content)) {
       result.push({
         type: 'paragraph',
-        text: item.text,
+        text: item.text || item.content || '',
         bold: Array.isArray(item.bold) ? item.bold : [],
       });
     } else if (item.type === 'bullet_list' && Array.isArray(item.items)) {
       result.push({
         type: 'bullet_list',
         items: item.items
-          .filter((i: any) => i && (typeof i === 'string' || (typeof i === 'object' && i.text)))
+          .filter((i: any) => i && (typeof i === 'string' || (typeof i === 'object' && (i.text || i.content))))
           .map((i: any) => ({
-            text: typeof i === 'string' ? i : i.text || '',
+            text: typeof i === 'string' ? i : i.text || i.content || '',
             bold: Array.isArray(i.bold) ? i.bold : [],
           })),
       });
@@ -431,26 +472,37 @@ function sanitizeContentItems(items: any[]): ContentItem[] {
       result.push({
         type: 'numbered_list',
         items: item.items
-          .filter((i: any) => i && (typeof i === 'string' || (typeof i === 'object' && i.text)))
+          .filter((i: any) => i && (typeof i === 'string' || (typeof i === 'object' && (i.text || i.content))))
           .map((i: any) => ({
-            text: typeof i === 'string' ? i : i.text || '',
+            text: typeof i === 'string' ? i : i.text || i.content || '',
             bold: Array.isArray(i.bold) ? i.bold : [],
           })),
       });
     } else if (item.type === 'table' && Array.isArray(item.headers)) {
       result.push({
         type: 'table',
-        headers: item.headers,
+        headers: item.headers.map((h: any) => String(h || '')),
         rows: Array.isArray(item.rows)
           ? item.rows.map((r: any) => ({
-              cells: Array.isArray(r.cells) ? r.cells : Array.isArray(r) ? r : [],
+              cells: Array.isArray(r.cells)
+                ? r.cells.map((c: any) => String(c || ''))
+                : Array.isArray(r)
+                ? r.map((c: any) => String(c || ''))
+                : [],
             }))
           : [],
       });
-    } else if (item.type === 'note' && item.text) {
+    } else if (item.type === 'note' && (item.text || item.content)) {
       result.push({
         type: 'note',
+        text: item.text || item.content || '',
+      });
+    } else if (item.text) {
+      // Fallback for objects with text but missing or unknown type
+      result.push({
+        type: 'paragraph',
         text: item.text,
+        bold: Array.isArray(item.bold) ? item.bold : [],
       });
     }
   }

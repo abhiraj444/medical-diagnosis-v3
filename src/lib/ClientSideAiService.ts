@@ -7,9 +7,10 @@ import {
     extractProgressiveDiagnosis,
     extractProgressiveSlides,
     extractProgressiveClinicalAnswer,
+    sanitizeContentItems,
 } from '@/lib/streaming-parser';
 
-export { parseAiJson, repairJsonString, extractProgressiveDiagnosis, extractProgressiveSlides, extractProgressiveClinicalAnswer };
+export { parseAiJson, repairJsonString, extractProgressiveDiagnosis, extractProgressiveSlides, extractProgressiveClinicalAnswer, sanitizeContentItems };
 
 export const DEFAULT_GEMINI_MODEL = 'gemini-3.7-flash';
 export const DEFAULT_STT_MODEL = 'whisper-large-v3-turbo';
@@ -1811,6 +1812,7 @@ Format:
             language?: TargetLanguage;
             audienceMode?: AudienceMode;
             signal?: AbortSignal;
+            onStreamChunk?: (payload: StreamChunkCallbackPayload) => void;
         }
     ): Promise<Slide[]> {
         const language = input.language || 'english';
@@ -1886,10 +1888,27 @@ ${JSON.stringify(
 ]
 `;
 
-        const text = await executeAiPrompt(apiKeyOrConfig, prompt, undefined, { signal: input.signal });
+        const text = await this._runPrompt(
+            apiKeyOrConfig,
+            prompt,
+            undefined,
+            input.onStreamChunk,
+            { signal: input.signal }
+        );
 
         type ModifiedSlideItem = Slide & { originalIndex?: number };
-        const parsedModified = parseAiJson<ModifiedSlideItem[]>(text, []);
+        let parsedModified = parseAiJson<ModifiedSlideItem[]>(text, []);
+
+        // Fallback: If returned object wasn't unwrapped into an array or was empty
+        if (!Array.isArray(parsedModified) || parsedModified.length === 0) {
+            const progressiveSlides = extractProgressiveSlides(text);
+            if (progressiveSlides.length > 0) {
+                parsedModified = progressiveSlides.map((s, idx) => ({
+                    ...s,
+                    originalIndex: targetSlides[idx]?.originalIndex ?? input.selectedIndices[idx],
+                }));
+            }
+        }
 
         if (!Array.isArray(parsedModified) || parsedModified.length === 0) {
             console.warn('Failed to parse modified slides JSON, keeping original slides.');
@@ -1902,15 +1921,32 @@ ${JSON.stringify(
             const targetIndex =
                 typeof modSlide.originalIndex === 'number'
                     ? modSlide.originalIndex
-                    : input.selectedIndices[i];
+                    : targetSlides[i]?.originalIndex ?? input.selectedIndices[i];
+
             if (typeof targetIndex === 'number' && targetIndex >= 0 && targetIndex < mergedSlides.length) {
+                const currentSlide = mergedSlides[targetIndex];
+                const cleanContent = Array.isArray(modSlide.content) && modSlide.content.length > 0
+                    ? sanitizeContentItems(modSlide.content)
+                    : currentSlide.content;
+
+                const cleanPearls = Array.isArray(modSlide.clinicalPearls) && modSlide.clinicalPearls.length > 0
+                    ? modSlide.clinicalPearls.filter(Boolean)
+                    : currentSlide.clinicalPearls;
+
+                const cleanQuestions = Array.isArray(modSlide.proactiveQuestions) && modSlide.proactiveQuestions.length > 0
+                    ? modSlide.proactiveQuestions.filter(Boolean)
+                    : currentSlide.proactiveQuestions;
+
                 mergedSlides[targetIndex] = {
-                    title: modSlide.title || mergedSlides[targetIndex].title,
-                    content: modSlide.content || mergedSlides[targetIndex].content,
-                    summary: modSlide.summary || mergedSlides[targetIndex].summary,
-                    clinicalPearls: modSlide.clinicalPearls || mergedSlides[targetIndex].clinicalPearls,
-                    proactiveQuestions:
-                        modSlide.proactiveQuestions || mergedSlides[targetIndex].proactiveQuestions,
+                    title: (modSlide.title && typeof modSlide.title === 'string' && modSlide.title.trim())
+                        ? modSlide.title.trim()
+                        : currentSlide.title,
+                    content: cleanContent,
+                    summary: (modSlide.summary && typeof modSlide.summary === 'string' && modSlide.summary.trim())
+                        ? modSlide.summary.trim()
+                        : currentSlide.summary,
+                    clinicalPearls: cleanPearls,
+                    proactiveQuestions: cleanQuestions,
                 };
             }
         });
