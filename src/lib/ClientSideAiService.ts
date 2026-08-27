@@ -555,6 +555,18 @@ export async function executeAiPrompt(
             }
         } catch (err: any) {
             lastErr = err;
+            const msg = (err?.message || '').toLowerCase();
+            if (
+                msg.includes('api_key_invalid') ||
+                msg.includes('invalid api key') ||
+                msg.includes('quota') ||
+                msg.includes('resource_exhausted') ||
+                msg.includes('429') ||
+                msg.includes('permission_denied') ||
+                msg.includes('403')
+            ) {
+                break;
+            }
             console.warn(`Direct model ${modelName} encountered error, attempting next fallback...`, err?.message);
             continue;
         }
@@ -682,6 +694,18 @@ export async function executeStreamingAiPrompt(
                 return { text: accumulatedText, thinking: accumulatedThinking };
             }
         } catch (streamErr: any) {
+            const errMsg = (streamErr?.message || '').toLowerCase();
+            if (
+                errMsg.includes('api_key_invalid') ||
+                errMsg.includes('invalid api key') ||
+                errMsg.includes('quota') ||
+                errMsg.includes('resource_exhausted') ||
+                errMsg.includes('429') ||
+                errMsg.includes('permission_denied') ||
+                errMsg.includes('403')
+            ) {
+                throw streamErr;
+            }
             console.warn('Streaming API Route unavailable or encountered an error. Falling back to non-streaming execution...', streamErr);
         }
     }

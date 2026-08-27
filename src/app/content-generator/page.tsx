@@ -106,6 +106,8 @@ function ContentGeneratorContent() {
 
   const processedFromCaseRef = useRef<string | null>(null);
   const loadedCaseIdRef = useRef<string | null>(null);
+  const lastQuestionUpdateRef = useRef<number>(0);
+  const lastSlideUpdateRef = useRef<number>(0);
 
   const { toast } = useToast();
   const { user, loading: authLoading } = useAuth();
@@ -430,18 +432,23 @@ function ContentGeneratorContent() {
     if (payload.step) setStreamStep(payload.step);
     if (payload.text) {
       setStreamText(payload.text);
-      const progressiveAnswer = extractProgressiveClinicalAnswer(payload.text);
-      if (progressiveAnswer.answer) {
-        setResult((prev: any) => ({
-          ...prev,
-          answer: progressiveAnswer.answer,
-          reasoning: progressiveAnswer.reasoning || prev?.reasoning,
-          topic: progressiveAnswer.topic || prev?.topic || 'Clinical Analysis',
-          keyTakeaways: progressiveAnswer.keyTakeaways.length > 0 ? progressiveAnswer.keyTakeaways : (prev?.keyTakeaways || []),
-        }));
-      }
-      if (progressiveAnswer.proactiveQuestions.length > 0) {
-        setProactiveQuestions(progressiveAnswer.proactiveQuestions);
+      const now = Date.now();
+      // Throttle heavy regex and state updates to at most once per 120ms to keep UI silky smooth
+      if (now - lastQuestionUpdateRef.current > 120) {
+        lastQuestionUpdateRef.current = now;
+        const progressiveAnswer = extractProgressiveClinicalAnswer(payload.text);
+        if (progressiveAnswer.answer) {
+          setResult((prev: any) => ({
+            ...prev,
+            answer: progressiveAnswer.answer,
+            reasoning: progressiveAnswer.reasoning || prev?.reasoning,
+            topic: progressiveAnswer.topic || prev?.topic || 'Clinical Analysis',
+            keyTakeaways: progressiveAnswer.keyTakeaways.length > 0 ? progressiveAnswer.keyTakeaways : (prev?.keyTakeaways || []),
+          }));
+        }
+        if (progressiveAnswer.proactiveQuestions.length > 0) {
+          setProactiveQuestions(progressiveAnswer.proactiveQuestions);
+        }
       }
     }
   };
@@ -457,20 +464,25 @@ function ContentGeneratorContent() {
     if (payload.model) setStreamModelName(formatModelDisplayName(payload.model));
     if (payload.step) setStreamStep(payload.step);
     if (payload.text) {
-      const progressiveSlides = extractProgressiveSlides(payload.text);
-      if (progressiveSlides.length > 0) {
-        setSlides((prev: Slide[] | null) => {
-          if (!prev || prev.length === 0) return progressiveSlides;
-          const next = [...prev];
-          for (let i = 0; i < progressiveSlides.length; i++) {
-            if (i < next.length) {
-              next[i] = progressiveSlides[i];
-            } else {
-              next.push(progressiveSlides[i]);
+      const now = Date.now();
+      // Throttle slide parser to at most once per 150ms to prevent main thread blocking
+      if (now - lastSlideUpdateRef.current > 150) {
+        lastSlideUpdateRef.current = now;
+        const progressiveSlides = extractProgressiveSlides(payload.text);
+        if (progressiveSlides.length > 0) {
+          setSlides((prev: Slide[] | null) => {
+            if (!prev || prev.length === 0) return progressiveSlides;
+            const next = [...prev];
+            for (let i = 0; i < progressiveSlides.length; i++) {
+              if (i < next.length) {
+                next[i] = progressiveSlides[i];
+              } else {
+                next.push(progressiveSlides[i]);
+              }
             }
-          }
-          return next;
-        });
+            return next;
+          });
+        }
       }
     }
   };
@@ -510,22 +522,18 @@ function ContentGeneratorContent() {
         mergeTargetKb: mergeTargetKb || 150,
       });
 
-      const [response, summaryResponse] = await Promise.all([
-        ClientSideAiService.answerClinicalQuestion(aiConfig, question.trim() || undefined, imagesForAi, {
-          language,
-          audienceMode,
-          onStreamChunk: handleQuestionStreamChunk,
-        }),
-        ClientSideAiService.summarizeQuestion(aiConfig, question.trim() || undefined, imagesForAi, {
-          language,
-          audienceMode,
-        }),
-      ]);
+      // 3. Single efficient multimodal call (no redundant duplicate summary call)
+      const response = await ClientSideAiService.answerClinicalQuestion(aiConfig, question.trim() || undefined, imagesForAi, {
+        language,
+        audienceMode,
+        onStreamChunk: handleQuestionStreamChunk,
+      });
 
       setResult(response);
       setProactiveQuestions(response.proactiveQuestions || []);
+      const summaryTitle = response.topic || (question.trim() ? question.trim().slice(0, 80) : 'Clinical Inquiry Analysis');
       // Store original full-resolution files in the structured case history
-      const newStructuredQuestion = { summary: summaryResponse.summary, images: imageUrls };
+      const newStructuredQuestion = { summary: summaryTitle, images: imageUrls };
       setStructuredQuestion(newStructuredQuestion);
 
       const existingCase = currentCaseId ? await LocalDataService.getCase(currentCaseId) : null;
@@ -533,7 +541,7 @@ function ContentGeneratorContent() {
         id: currentCaseId || undefined,
         userId: user.id,
         type: 'content-generator',
-        title: response.topic || summaryResponse.summary,
+        title: summaryTitle,
         inputData: {
           mode: 'question',
           question: question.trim() || null,

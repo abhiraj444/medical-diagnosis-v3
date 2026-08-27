@@ -95,6 +95,7 @@ function AiDiagnosisContent() {
   const [streamingStatus, setStreamingStatus] = useState<string>('');
   const [thinkingProcess, setThinkingProcess] = useState<string | undefined>(undefined);
   const loadedCaseIdRef = useRef<string | null>(null);
+  const lastDiagStreamUpdateRef = useRef<number>(0);
 
   const { toast } = useToast();
   const { user, loading: authLoading } = useAuth();
@@ -463,22 +464,26 @@ function AiDiagnosisContent() {
             onThoughtChunk: (_chunk, fullThought) => setStreamingThought(fullThought),
             onTextChunk: (_chunk, fullText) => {
               setStreamingText(fullText);
-              // Progressively extract completed diagnoses, clinical synthesis and questions
-              const progressive = extractProgressiveDiagnosis(fullText);
-              if (progressive.diagnoses && progressive.diagnoses.length > 0) {
-                setResults(progressive.diagnoses);
-              }
-              if (progressive.clinicalAnswer && progressive.clinicalAnswer.answer) {
-                setClinicalAnswer(progressive.clinicalAnswer as ClinicalAnswerData);
-              }
-              if (progressive.proactiveQuestions && progressive.proactiveQuestions.length > 0) {
-                setProactiveQuestions(progressive.proactiveQuestions);
-              }
-              if (progressive.reportKnowledge) {
-                setReportKnowledge(progressive.reportKnowledge);
-              }
-              if (progressive.caseSummaryForPresentation) {
-                setCaseSummaryForPresentation(progressive.caseSummaryForPresentation);
+              const now = Date.now();
+              // Throttle complex regex and JSON parsing to at most once per 150ms during streaming
+              if (now - lastDiagStreamUpdateRef.current > 150) {
+                lastDiagStreamUpdateRef.current = now;
+                const progressive = extractProgressiveDiagnosis(fullText);
+                if (progressive.diagnoses && progressive.diagnoses.length > 0) {
+                  setResults(progressive.diagnoses);
+                }
+                if (progressive.clinicalAnswer && progressive.clinicalAnswer.answer) {
+                  setClinicalAnswer(progressive.clinicalAnswer as ClinicalAnswerData);
+                }
+                if (progressive.proactiveQuestions && progressive.proactiveQuestions.length > 0) {
+                  setProactiveQuestions(progressive.proactiveQuestions);
+                }
+                if (progressive.reportKnowledge) {
+                  setReportKnowledge(progressive.reportKnowledge);
+                }
+                if (progressive.caseSummaryForPresentation) {
+                  setCaseSummaryForPresentation(progressive.caseSummaryForPresentation);
+                }
               }
             },
             onStatus: (msg) => setStreamingStatus(msg),

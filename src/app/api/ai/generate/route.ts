@@ -27,7 +27,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function parseGoogleErrorMessage(err: any): { message: string; statusCode: number } {
+function parseGoogleErrorMessage(err: any): { message: string; statusCode: number; isFatal: boolean } {
   const raw = err?.message || String(err || '');
   const rawLower = raw.toLowerCase();
 
@@ -35,13 +35,15 @@ function parseGoogleErrorMessage(err: any): { message: string; statusCode: numbe
     return {
       message: 'Invalid Google Gemini API Key. Please verify your API key in Settings (or check GEMINI_API_KEY in your Vercel Environment Variables).',
       statusCode: 401,
+      isFatal: true,
     };
   }
 
   if (rawLower.includes('quota') || rawLower.includes('resource_exhausted') || rawLower.includes('429') || rawLower.includes('rate limit')) {
     return {
-      message: 'Gemini API Rate Limit / Quota Exceeded (429). Please wait a moment before trying again or check your billing quota in Google AI Studio.',
+      message: 'Gemini API Rate Limit / Quota Exceeded (429). Please wait a few seconds before trying again or check your billing quota in Google AI Studio.',
       statusCode: 429,
+      isFatal: true,
     };
   }
 
@@ -49,6 +51,7 @@ function parseGoogleErrorMessage(err: any): { message: string; statusCode: numbe
     return {
       message: 'Gemini API Permission Denied (403). Your API key does not have access to this feature or model.',
       statusCode: 403,
+      isFatal: true,
     };
   }
 
@@ -56,6 +59,7 @@ function parseGoogleErrorMessage(err: any): { message: string; statusCode: numbe
     return {
       message: `Gemini Model Not Found (404). ${raw}`,
       statusCode: 404,
+      isFatal: false,
     };
   }
 
@@ -63,6 +67,7 @@ function parseGoogleErrorMessage(err: any): { message: string; statusCode: numbe
     return {
       message: 'The AI request was filtered by safety policies. Please adjust or clarify the clinical phrasing.',
       statusCode: 422,
+      isFatal: true,
     };
   }
 
@@ -70,12 +75,14 @@ function parseGoogleErrorMessage(err: any): { message: string; statusCode: numbe
     return {
       message: 'Google Gemini service is temporarily overloaded (503). Please retry in a few seconds.',
       statusCode: 503,
+      isFatal: false,
     };
   }
 
   return {
     message: raw.length > 300 ? raw.slice(0, 300) + '...' : raw,
     statusCode: 500,
+    isFatal: false,
   };
 }
 
@@ -413,9 +420,13 @@ export async function POST(req: NextRequest) {
         }
       } catch (err: any) {
         lastError = err;
-        const errMsg = (err?.message || '').toLowerCase();
-        console.warn(`Model ${modelName} encountered error (${errMsg}), attempting fallback model...`);
-        // Continue to the next fallback model in the list (e.g. gemini-3.6-flash, gemini-2.5-flash)
+        const parsedErr = parseGoogleErrorMessage(err);
+        console.warn(`Model ${modelName} encountered error: ${parsedErr.message}`);
+        if (parsedErr.isFatal) {
+          // If error is fatal (401, 429, 403, 422), do not hammer remaining models
+          break;
+        }
+        // Otherwise attempt fallback model
         continue;
       }
     }

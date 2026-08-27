@@ -113,7 +113,19 @@ export async function POST(req: NextRequest) {
         });
       } catch (err: any) {
         lastError = err;
-        console.warn(`Test route model ${modelName} failed, trying fallback...`, err?.message);
+        const msg = (err?.message || '').toLowerCase();
+        console.warn(`Test route model ${modelName} failed:`, err?.message);
+        if (
+          msg.includes('api_key_invalid') ||
+          msg.includes('invalid api key') ||
+          msg.includes('quota') ||
+          msg.includes('resource_exhausted') ||
+          msg.includes('429') ||
+          msg.includes('permission_denied') ||
+          msg.includes('403')
+        ) {
+          break;
+        }
         continue;
       }
     }

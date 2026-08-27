@@ -17,7 +17,7 @@ function isThinkingModel(modelName: string): boolean {
   return THINKING_MODELS.some((m) => modelName.toLowerCase().includes(m));
 }
 
-function parseGoogleErrorMessage(err: any): { message: string; statusCode: number } {
+function parseGoogleErrorMessage(err: any): { message: string; statusCode: number; isFatal: boolean } {
   const raw = err?.message || String(err || '');
   const rawLower = raw.toLowerCase();
 
@@ -25,29 +25,34 @@ function parseGoogleErrorMessage(err: any): { message: string; statusCode: numbe
     return {
       message: 'Invalid Google Gemini API Key. Please verify your API key in Settings.',
       statusCode: 401,
+      isFatal: true,
     };
   }
   if (rawLower.includes('quota') || rawLower.includes('resource_exhausted') || rawLower.includes('429')) {
     return {
-      message: 'Gemini API Rate Limit / Quota Exceeded (429). Please wait a moment before trying again.',
+      message: 'Gemini API Rate Limit / Quota Exceeded (429). Please wait a few seconds before trying again.',
       statusCode: 429,
+      isFatal: true,
     };
   }
   if (rawLower.includes('permission_denied') || rawLower.includes('403')) {
     return {
       message: 'Gemini API Permission Denied (403). Your API key does not have access to this feature.',
       statusCode: 403,
+      isFatal: true,
     };
   }
   if (rawLower.includes('safety') || rawLower.includes('blocked')) {
     return {
       message: 'The AI request was filtered by safety policies. Please clarify the clinical phrasing.',
       statusCode: 422,
+      isFatal: true,
     };
   }
   return {
     message: raw.length > 300 ? raw.slice(0, 300) + '...' : raw,
     statusCode: 500,
+    isFatal: false,
   };
 }
 
@@ -302,10 +307,10 @@ export async function POST(req: NextRequest) {
             }
           } catch (err: any) {
             lastError = err;
-            const errMsg = (err?.message || '').toLowerCase();
-            console.warn(`Streaming attempt with model ${modelName} failed (${errMsg}), trying fallback model...`);
-            if (streamStarted) {
-              // If stream already started outputting to user, send error
+            const parsedErr = parseGoogleErrorMessage(err);
+            console.warn(`Streaming attempt with model ${modelName} failed: ${parsedErr.message}`);
+            if (streamStarted || parsedErr.isFatal) {
+              // If stream already started or error is fatal (401 invalid key, 429 quota, 403 permission), stop immediately
               break;
             }
             // Otherwise try next fallback model
