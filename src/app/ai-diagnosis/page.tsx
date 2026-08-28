@@ -11,6 +11,7 @@ import { DiagnosisCard } from '@/components/DiagnosisCard';
 import { ReportParameterAnalysis } from '@/components/ReportParameterAnalysis';
 import { ClinicalMarkdownRenderer } from '@/components/ClinicalMarkdownRenderer';
 import { ClinicalThinkingBox } from '@/components/ClinicalThinkingBox';
+import { AiStreamingRawLogBox } from '@/components/AiStreamingRawLogBox';
 import {
   FileText,
   Loader2,
@@ -94,6 +95,8 @@ function AiDiagnosisContent() {
   const [streamingThought, setStreamingThought] = useState<string>('');
   const [streamingText, setStreamingText] = useState<string>('');
   const [streamingStatus, setStreamingStatus] = useState<string>('');
+  const [followUpStreamText, setFollowUpStreamText] = useState<string>('');
+  const [followUpStreamThought, setFollowUpStreamThought] = useState<string>('');
   const [thinkingProcess, setThinkingProcess] = useState<string | undefined>(undefined);
   const loadedCaseIdRef = useRef<string | null>(null);
   const lastDiagStreamUpdateRef = useRef<number>(0);
@@ -367,6 +370,9 @@ function AiDiagnosisContent() {
     abortControllerRef.current = controller;
     setIsAnalyzingReport(true);
     setErrorMessage(null);
+    setStreamingThought('');
+    setStreamingText('');
+    setStreamingStatus('Extracting lab parameters, biomarkers, and reference ranges...');
     try {
       // 1. Save original full-resolution files to local storage/history
       const imageUrls = await Promise.all(
@@ -390,6 +396,11 @@ function AiDiagnosisContent() {
           language,
           audienceMode,
           signal: controller.signal,
+          onStreamChunk: (payload) => {
+            if (payload.thinking) setStreamingThought(payload.thinking);
+            if (payload.text) setStreamingText(payload.text);
+            if (payload.step) setStreamingStatus(payload.step);
+          },
         }
       );
 
@@ -586,6 +597,8 @@ function AiDiagnosisContent() {
     const controller = new AbortController();
     followUpAbortControllerRef.current = controller;
     setIsAskingFollowUp(true);
+    setFollowUpStreamText('');
+    setFollowUpStreamThought('');
     try {
       const conversationHistory = followUpThreads.map((t) => ({
         question: t.question,
@@ -607,6 +620,10 @@ function AiDiagnosisContent() {
           audienceMode,
           images,
           signal: controller.signal,
+          onStreamChunk: (payload) => {
+            if (payload.text) setFollowUpStreamText(payload.text);
+            if (payload.thinking) setFollowUpStreamThought(payload.thinking);
+          },
         }
       );
 
@@ -653,6 +670,8 @@ function AiDiagnosisContent() {
     } finally {
       setIsAskingFollowUp(false);
       followUpAbortControllerRef.current = null;
+      setFollowUpStreamText('');
+      setFollowUpStreamThought('');
     }
   };
 
@@ -1160,23 +1179,25 @@ function AiDiagnosisContent() {
               )}
 
               {/* Active Streaming Reasoning & Output Preview */}
-              {isLoading && !isLoadingCase && (
+              {(isLoading || isAnalyzingReport || streamingText || streamingThought) && !isLoadingCase && (
                 <div className="space-y-4">
                   {/* Status Banner when no results have parsed yet */}
-                  {(!results || results.length === 0) && (
+                  {(isLoading || isAnalyzingReport) && (!results || results.length === 0) && (
                     <Card className="border border-primary/20 bg-card p-6 shadow-xs flex flex-col items-center justify-center text-center space-y-3">
                       <Loader2 className="h-8 w-8 animate-spin text-primary" />
                       <div className="space-y-1">
-                        <p className="text-sm font-bold text-foreground">Diagnosing in process...</p>
+                        <p className="text-sm font-bold text-foreground">
+                          {isAnalyzingReport ? 'Extracting report parameters...' : 'Diagnosing in process...'}
+                        </p>
                         <p className="text-xs text-muted-foreground">
-                          {PROGRESS_MESSAGES[progressStep] || 'Synthesizing clinical differential considerations and evidence...'}
+                          {streamingStatus || PROGRESS_MESSAGES[progressStep] || 'Synthesizing clinical differential considerations and evidence...'}
                         </p>
                       </div>
                     </Card>
                   )}
 
                   {/* Diagnosing In Process Banner when cards are already streaming */}
-                  {results && results.length > 0 && (
+                  {isLoading && results && results.length > 0 && (
                     <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 rounded-lg bg-primary/10 border border-primary/20 text-xs font-semibold text-primary">
                       <div className="flex items-center gap-2">
                         <Loader2 className="h-4 w-4 animate-spin shrink-0" />
@@ -1188,14 +1209,23 @@ function AiDiagnosisContent() {
                     </div>
                   )}
 
-                  {enableLiveThinking && streamingThought && (
-                    <ClinicalThinkingBox thought={streamingThought} isStreaming={true} className="shadow-xs" />
-                  )}
+                  {/* Raw Text Streaming & Reasoning Box */}
+                  <AiStreamingRawLogBox
+                    isLoading={isLoading || isAnalyzingReport}
+                    streamText={streamingText}
+                    thinkingText={streamingThought || thinkingProcess || ''}
+                    currentStep={streamingStatus || PROGRESS_MESSAGES[progressStep] || 'Synthesizing clinical evidence...'}
+                    steps={['Clinical History & Multi-Modal Processing', 'Differential Hypothesis & Likelihood Ranking', 'Guideline Synthesis & Parameter Breakdown']}
+                    activeStepIndex={progressStep}
+                    onStop={handleStopAnalysis}
+                    title="Clinical AI Live Stream & Reasoning"
+                    defaultExpanded={true}
+                  />
                 </div>
               )}
 
-              {/* Completed Case Thinking Process (shown when feature flag enabled or in diagnosis cards) */}
-              {!isLoading && thinkingProcess && enableLiveThinking && (
+              {/* Completed Case Thinking Process (shown when feature flag enabled or available) */}
+              {!isLoading && !isAnalyzingReport && !streamingText && thinkingProcess && enableLiveThinking && (
                 <ClinicalThinkingBox thought={thinkingProcess} className="shadow-xs" />
               )}
 
@@ -1335,6 +1365,8 @@ function AiDiagnosisContent() {
                   onAskFollowUp={handleAskFollowUp}
                   onStop={handleStopFollowUp}
                   isLoading={isAskingFollowUp}
+                  streamingText={followUpStreamText}
+                  streamingThought={followUpStreamThought}
                   title="Clinical Blind Spots & Interactive Q&A"
                   description="Proactive questions generated for this case. Click any chip to ask, or type a custom question."
                   sourceContext="diagnosis"

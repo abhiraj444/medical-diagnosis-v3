@@ -31,6 +31,7 @@ import { isPdfFile, convertPdfToImages } from '@/lib/pdf-to-images';
 import { prepareImagesForAiPrompt } from '@/lib/image-compressor';
 import { useSettings } from '@/context/SettingsContext';
 import { ClinicalMarkdownRenderer } from './ClinicalMarkdownRenderer';
+import { AiStreamingRawLogBox } from './AiStreamingRawLogBox';
 import type { FollowUpThread } from '@/types';
 
 interface FollowUpChatProps {
@@ -39,6 +40,8 @@ interface FollowUpChatProps {
   onAskFollowUp: (question: string, images?: string[]) => Promise<void>;
   onStop?: () => void;
   isLoading?: boolean;
+  streamingText?: string;
+  streamingThought?: string;
   title?: string;
   description?: string;
   sourceContext?: 'diagnosis' | 'slide';
@@ -51,6 +54,8 @@ export function FollowUpChat({
   onAskFollowUp,
   onStop,
   isLoading = false,
+  streamingText = '',
+  streamingThought = '',
   title = 'Clinical Inquiries & Case Consultation',
   description = 'Explore diagnostic blind spots, guideline updates, or ask custom clinical questions with attached documents.',
   sourceContext = 'diagnosis',
@@ -385,33 +390,47 @@ export function FollowUpChat({
           </div>
         )}
 
-        {/* Loading State with Stop Button */}
-        {isLoading && (
-          <div className="flex items-center justify-between gap-3 p-4 rounded-xl border border-primary/30 bg-primary/5 animate-pulse">
-            <div className="flex items-center gap-3 min-w-0">
-              <Loader2 className="h-4 w-4 animate-spin text-primary shrink-0" />
-              <div className="space-y-0.5 min-w-0">
-                <p className="text-xs sm:text-sm font-bold text-primary truncate">
-                  Preceptor AI consulting clinical evidence &amp; guidelines...
-                </p>
-                <p className="text-[11px] text-muted-foreground truncate">
-                  Analyzing drug interactions, renal adjustments, attached documents, and management algorithms
-                </p>
+        {/* Loading State with Raw Stream & Stop Button */}
+        {(isLoading || streamingText || streamingThought) && (
+          <div className="space-y-3">
+            {isLoading && !streamingText && !streamingThought && (
+              <div className="flex items-center justify-between gap-3 p-4 rounded-xl border border-primary/30 bg-primary/5 animate-pulse">
+                <div className="flex items-center gap-3 min-w-0">
+                  <Loader2 className="h-4 w-4 animate-spin text-primary shrink-0" />
+                  <div className="space-y-0.5 min-w-0">
+                    <p className="text-xs sm:text-sm font-bold text-primary truncate">
+                      Preceptor AI consulting clinical evidence &amp; guidelines...
+                    </p>
+                    <p className="text-[11px] text-muted-foreground truncate">
+                      Analyzing drug interactions, renal adjustments, attached documents, and management algorithms
+                    </p>
+                  </div>
+                </div>
+                {onStop && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="destructive"
+                    onClick={onStop}
+                    className="h-7 px-2.5 text-xs gap-1.5 shrink-0 shadow-xs"
+                    title="Stop AI consultation"
+                  >
+                    <Square className="h-3 w-3 fill-current" />
+                    <span>Stop</span>
+                  </Button>
+                )}
               </div>
-            </div>
-            {onStop && (
-              <Button
-                type="button"
-                size="sm"
-                variant="destructive"
-                onClick={onStop}
-                className="h-7 px-2.5 text-xs gap-1.5 shrink-0 shadow-xs"
-                title="Stop AI consultation"
-              >
-                <Square className="h-3 w-3 fill-current" />
-                <span>Stop</span>
-              </Button>
             )}
+
+            <AiStreamingRawLogBox
+              isLoading={isLoading}
+              streamText={streamingText}
+              thinkingText={streamingThought}
+              currentStep="Preceptor AI synthesizing evidence & answering follow-up..."
+              title="Clinical Inquiry Live Stream & Reasoning"
+              onStop={onStop}
+              defaultExpanded={true}
+            />
           </div>
         )}
 

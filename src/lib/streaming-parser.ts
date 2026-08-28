@@ -1,6 +1,19 @@
 import type { DiagnosisItem, ClinicalAnswerData, Slide, ReportKnowledgeData, ContentItem } from '@/types';
 
 /**
+ * Unescapes JSON string escape sequences (\n, \t, \", \\) safely
+ */
+function unescapeJsonStr(str: string): string {
+  if (!str) return '';
+  return str
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r')
+    .replace(/\\t/g, '\t')
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, '\\');
+}
+
+/**
  * Repairs truncated, partial, or malformed JSON strings by closing unclosed quotes,
  * brackets, braces, and trailing commas.
  */
@@ -62,6 +75,8 @@ export function repairJsonString(jsonStr: string): string {
   // Clean trailing keys or colons that might have been left at the end (e.g. `"type":` or `"bold":`)
   text = text.replace(/:\s*$/, ': null');
   text = text.replace(/,\s*$/, '');
+  // Clean dangling key without colon at the end e.g. `, "some_key"`
+  text = text.replace(/,\s*"[^"]*"\s*$/, '');
 
   // Close remaining unclosed brackets/braces in reverse
   while (stack.length > 0) {
@@ -275,16 +290,50 @@ export function extractProgressiveDiagnosis(rawText: string): {
     // If structured parse fails, attempt regex extraction for partial streaming
   }
 
-  // Regex fallback for progressive partial extraction if JSON parse returned empty
+  // Regex fallback for progressive partial extraction if JSON parse returned empty or partial
+  if (!result.summary) {
+    const sumMatch = rawText.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)/i);
+    if (sumMatch && sumMatch[1]) {
+      result.summary = unescapeJsonStr(sumMatch[1]).trim();
+    }
+  }
+
+  if (!result.caseSummaryForPresentation) {
+    const caseSumMatch = rawText.match(/"caseSummaryForPresentation"\s*:\s*"((?:[^"\\]|\\.)*)/i);
+    if (caseSumMatch && caseSumMatch[1]) {
+      result.caseSummaryForPresentation = unescapeJsonStr(caseSumMatch[1]).trim();
+    }
+  }
+
+  if (!result.clinicalAnswer || !result.clinicalAnswer.answer) {
+    const ansMatch = rawText.match(/"answer"\s*:\s*"((?:[^"\\]|\\.)*)/i);
+    if (ansMatch && ansMatch[1]) {
+      const liveAnswer = unescapeJsonStr(ansMatch[1]);
+      if (liveAnswer.trim()) {
+        result.clinicalAnswer = {
+          ...result.clinicalAnswer,
+          answer: liveAnswer,
+          topic: result.clinicalAnswer?.topic || 'Clinical Differential Analysis',
+          reasoning: result.clinicalAnswer?.reasoning || 'Live guideline-directed clinical evaluation',
+          keyTakeaways: result.clinicalAnswer?.keyTakeaways || [],
+        };
+      }
+    }
+  }
+
   if (result.diagnoses.length === 0) {
-    const diagBlocks = rawText.matchAll(/\{\s*"diagnosis"\s*:\s*"([^"]+)"[\s\S]*?"reasoning"\s*:\s*"([^"]+)"/g);
-    for (const match of diagBlocks) {
-      if (match[1] && match[2]) {
+    // Scan for diagnoses objects inside the string
+    const diagRegex = /"diagnosis"\s*:\s*"((?:[^"\\]|\\.)*)"[\s\S]*?(?:"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)"|(?:"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)))?/gi;
+    let match: RegExpExecArray | null;
+    while ((match = diagRegex.exec(rawText)) !== null) {
+      if (match[1] && match[1].trim().length > 1) {
+        const diagName = unescapeJsonStr(match[1]).trim();
+        const reason = unescapeJsonStr(match[2] || match[3] || '').trim();
         result.diagnoses.push({
-          diagnosis: match[1],
+          diagnosis: diagName,
           confidenceLevel: 0.85,
           lifeThreatCategory: 'Emergent',
-          reasoning: match[2].replace(/\\n/g, '\n').replace(/\\"/g, '"'),
+          reasoning: reason,
           missingInformation: { information: [], tests: [] },
         });
       }

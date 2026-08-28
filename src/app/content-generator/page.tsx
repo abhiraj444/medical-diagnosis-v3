@@ -81,6 +81,8 @@ function ContentGeneratorContent() {
   // Streaming & Thinking process states
   const [streamThinking, setStreamThinking] = useState<string>('');
   const [streamText, setStreamText] = useState<string>('');
+  const [followUpStreamText, setFollowUpStreamText] = useState<string>('');
+  const [followUpStreamThought, setFollowUpStreamThought] = useState<string>('');
   const [streamStep, setStreamStep] = useState<string>('');
   const [activeStepIndex, setActiveStepIndex] = useState<number>(0);
   const [streamModelName, setStreamModelName] = useState<string>(() => formatModelDisplayName(activeModel));
@@ -230,6 +232,7 @@ function ContentGeneratorContent() {
                   if (payload.model) setStreamModelName(formatModelDisplayName(payload.model));
                   if (payload.step) setStreamStep(payload.step);
                   if (payload.text) {
+                    setStreamText(payload.text);
                     const progressiveSlides = extractProgressiveSlides(payload.text);
                     if (progressiveSlides.length > 0) {
                       setSlides((prev: Slide[] | null) => {
@@ -474,6 +477,7 @@ function ContentGeneratorContent() {
     if (payload.thinking) setStreamThinking(payload.thinking);
     if (payload.model) setStreamModelName(formatModelDisplayName(payload.model));
     if (payload.step) setStreamStep(payload.step);
+    if (payload.text) setStreamText(payload.text);
   };
 
   const handleSlideStreamChunk = (payload: { thinking?: string; text?: string; step?: string; model?: string }) => {
@@ -481,6 +485,7 @@ function ContentGeneratorContent() {
     if (payload.model) setStreamModelName(formatModelDisplayName(payload.model));
     if (payload.step) setStreamStep(payload.step);
     if (payload.text) {
+      setStreamText(payload.text);
       const now = Date.now();
       // Throttle slide parser to at most once per 150ms to prevent main thread blocking
       if (now - lastSlideUpdateRef.current > 150) {
@@ -799,6 +804,8 @@ function ContentGeneratorContent() {
     const controller = new AbortController();
     followUpAbortControllerRef.current = controller;
     setIsAskingFollowUp(true);
+    setFollowUpStreamText('');
+    setFollowUpStreamThought('');
     try {
       const conversationHistory = followUpThreads.map((t) => ({
         question: t.question,
@@ -815,6 +822,10 @@ function ContentGeneratorContent() {
         language,
         audienceMode,
         signal: controller.signal,
+        onStreamChunk: (payload) => {
+          if (payload.text) setFollowUpStreamText(payload.text);
+          if (payload.thinking) setFollowUpStreamThought(payload.thinking);
+        },
       });
 
       const newThread: FollowUpThread = {
@@ -854,6 +865,8 @@ function ContentGeneratorContent() {
     } finally {
       setIsAskingFollowUp(false);
       followUpAbortControllerRef.current = null;
+      setFollowUpStreamText('');
+      setFollowUpStreamThought('');
     }
   };
 
@@ -1251,15 +1264,16 @@ function ContentGeneratorContent() {
               <span>Stop Request</span>
             </Button>
           </Card>
-          {streamThinking && (
+          {(isLoading || streamThinking || streamText) && (
             <ClinicalThinkingBox
-              isLoading={true}
+              isLoading={isLoading}
               thinkingText={streamThinking}
               streamText={streamText}
               currentStep={streamStep || 'Consultant AI analyzing clinical guidelines & generating content...'}
               activeStepIndex={activeStepIndex}
               modelName={streamModelName}
               title="Clinical AI Live Reasoning & Evidence Synthesis"
+              onStop={handleStopCurrentRequest}
             />
           )}
         </div>
@@ -1309,11 +1323,12 @@ function ContentGeneratorContent() {
                   <ClinicalThinkingBox
                     isLoading={true}
                     thinkingText={streamThinking}
-                    streamText={slides && slides.length > 0 ? '' : streamText}
+                    streamText={streamText}
                     currentStep={streamStep || 'Synthesizing postgraduate slides & structured evidence...'}
                     activeStepIndex={activeStepIndex}
                     modelName={streamModelName}
                     title="Slide Synthesis & Medical Reasoning"
+                    onStop={handleStopCurrentRequest}
                   />
                 </div>
               )}
@@ -1454,6 +1469,8 @@ function ContentGeneratorContent() {
             onAskFollowUp={handleAskFollowUp}
             onStop={handleStopFollowUp}
             isLoading={isAskingFollowUp}
+            streamingText={followUpStreamText}
+            streamingThought={followUpStreamThought}
             title="Clinical Inquiries & Q&A"
             description="Explore guidelines, pathophysiology mechanisms, or ask custom questions regarding this topic."
             sourceContext="slide"
