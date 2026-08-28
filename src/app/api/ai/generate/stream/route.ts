@@ -11,10 +11,17 @@ const GEMINI_FALLBACK_MODELS = [
   'gemini-3.1-flash-lite',
   'gemini-3.1-pro-preview',
 ];
-const THINKING_MODELS = ['gemini-3.7-flash', 'gemini-3.1-pro-preview'];
 
 function isThinkingModel(modelName: string): boolean {
-  return THINKING_MODELS.some((m) => modelName.toLowerCase().includes(m));
+  const lower = modelName.toLowerCase();
+  return (
+    lower.includes('3.7') ||
+    lower.includes('3.5') ||
+    lower.includes('2.5') ||
+    lower.includes('3.1') ||
+    lower.includes('think') ||
+    lower.includes('reason')
+  );
 }
 
 function parseGoogleErrorMessage(err: any): { message: string; statusCode: number; isFatal: boolean } {
@@ -260,6 +267,9 @@ export async function POST(req: NextRequest) {
                 genConfig.thinkingConfig = { thinkingBudget: 0 };
               } else if (typeof userBudget === 'number' && userBudget > 0) {
                 genConfig.thinkingConfig = { thinkingBudget: userBudget };
+              } else {
+                // Default thinking budget for Gemini 3.7 / 2.5 thinking models to ensure chain of thought is streamed
+                genConfig.thinkingConfig = { thinkingBudget: 2048 };
               }
             }
 
@@ -280,13 +290,26 @@ export async function POST(req: NextRequest) {
               if (parts && parts.length > 0) {
                 for (const part of parts) {
                   if ((part as any).thought) {
-                    thinking += part.text || '';
+                    const tContent = part.text || (typeof (part as any).thought === 'string' ? (part as any).thought : '');
+                    thinking += tContent;
                   } else if (part.text) {
                     text += part.text;
                   }
                 }
               } else if (chunk.text) {
                 text = chunk.text;
+              }
+
+              // Handle models that output inline <think> or <thought> tags
+              if (text && (text.includes('<think') || text.includes('<thought') || text.includes('<reasoning'))) {
+                const thinkRegex = /<(?:think|thought|reasoning)>([\s\S]*?)<\/(?:think|thought|reasoning)>/gi;
+                let m: RegExpExecArray | null;
+                while ((m = thinkRegex.exec(text)) !== null) {
+                  if (m[1]) {
+                    thinking += (thinking ? '\n' : '') + m[1].trim();
+                  }
+                }
+                text = text.replace(thinkRegex, '');
               }
 
               if (text || thinking) {

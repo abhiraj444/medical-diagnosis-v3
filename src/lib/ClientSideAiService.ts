@@ -1559,6 +1559,36 @@ Produce ONLY the JSON array.
 
         const text = await this._runPrompt(apiKeyOrConfig, prompt, undefined, input.onStreamChunk, { signal: input.signal });
 
+        // 1. Try progressive slide parser first (handles live markdown, code blocks, balance scanning, cell normalization)
+        const progressive = extractProgressiveSlides(text);
+        if (progressive && progressive.length > 0) {
+            const hasRealContent = progressive.some((s) => s.content && s.content.length > 0);
+            if (hasRealContent) {
+                return progressive;
+            }
+        }
+
+        // 2. Try JSON parser with array unwrap
+        const parsed = parseAiJson<Slide[]>(text, []);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+            const validParsed = parsed
+                .filter((s) => s && typeof s === 'object' && s.title)
+                .map((s) => ({
+                    title: s.title,
+                    content: Array.isArray(s.content) ? sanitizeContentItems(s.content) : [],
+                    summary: s.summary || '',
+                    clinicalPearls: Array.isArray(s.clinicalPearls) ? s.clinicalPearls : [],
+                    proactiveQuestions: Array.isArray(s.proactiveQuestions) ? s.proactiveQuestions : [],
+                }));
+            if (validParsed.length > 0 && validParsed.some((s) => s.content.length > 0)) {
+                return validParsed;
+            }
+        }
+
+        if (progressive && progressive.length > 0) {
+            return progressive;
+        }
+
         const fallback = input.selectedTopics.map((t: string) => ({
             title: t,
             content: [
@@ -1573,7 +1603,7 @@ Produce ONLY the JSON array.
             proactiveQuestions: [`What are the latest updates on ${t}?`],
         }));
 
-        return parseAiJson<Slide[]>(text, fallback);
+        return fallback;
     },
 
     /**

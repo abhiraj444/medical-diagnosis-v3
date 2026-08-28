@@ -764,7 +764,21 @@ function ContentGeneratorContent() {
         onStreamChunk: handleSlideStreamChunk,
       });
 
-      setSlides(generatedSlides);
+      let finalSlides = generatedSlides;
+      setSlides((prev) => {
+        const isGenRich = generatedSlides && generatedSlides.length > 0 && generatedSlides.some((s) => s.content && s.content.length > 0 && !s.content.some((c) => c.type === 'paragraph' && c.text.startsWith('Key details and insights for')));
+        if (isGenRich) {
+          finalSlides = generatedSlides;
+          return generatedSlides;
+        }
+        const isPrevRich = prev && prev.length > 0 && prev.some((s) => s.content && s.content.length > 0 && !s.content.some((c) => c.type === 'paragraph' && c.text.startsWith('Key details and insights for')));
+        if (isPrevRich) {
+          finalSlides = prev;
+          return prev;
+        }
+        finalSlides = generatedSlides;
+        return generatedSlides;
+      });
       setUsedTopics(selectedTopics);
 
       if (currentCaseId) {
@@ -772,7 +786,7 @@ function ContentGeneratorContent() {
         if (caseData) {
           caseData.outputData = {
             ...caseData.outputData,
-            slides: generatedSlides,
+            slides: finalSlides,
             outline: presentationOutline,
             selectedTopics: selectedTopics,
             usedTopics: selectedTopics,
