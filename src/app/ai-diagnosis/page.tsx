@@ -103,20 +103,6 @@ function AiDiagnosisContent() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const followUpAbortControllerRef = useRef<AbortController | null>(null);
 
-  const handleStopCurrentRequest = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
-  };
-
-  const handleStopFollowUp = () => {
-    if (followUpAbortControllerRef.current) {
-      followUpAbortControllerRef.current.abort();
-      followUpAbortControllerRef.current = null;
-    }
-  };
-
   const { toast } = useToast();
   const { user, loading: authLoading } = useAuth();
   const {
@@ -171,6 +157,12 @@ function AiDiagnosisContent() {
             setCaseSummaryForPresentation(caseData.outputData?.caseSummaryForPresentation || '');
             setFollowUpThreads(caseData.outputData?.followUpThreads || []);
             setThinkingProcess(caseData.outputData?.thinkingProcess || undefined);
+            if (caseData.outputData?.streamText) {
+              setStreamingText(caseData.outputData.streamText);
+            }
+            if (caseData.outputData?.thinkingProcess) {
+              setStreamingThought(caseData.outputData.thinkingProcess);
+            }
             setCurrentCaseId(caseId);
 
             if (caseData.outputData?.reportKnowledge && (!caseData.outputData?.diagnoses || caseData.outputData.diagnoses.length === 0)) {
@@ -566,6 +558,7 @@ function AiDiagnosisContent() {
           caseSummaryForPresentation: analysis.caseSummaryForPresentation,
           followUpThreads: followUpThreads || [],
           thinkingProcess: analysis.thinkingProcess,
+          streamText: streamingText || undefined,
         },
       };
 
@@ -673,6 +666,27 @@ function AiDiagnosisContent() {
       setFollowUpStreamText('');
       setFollowUpStreamThought('');
     }
+  };
+
+  const handleStopAnalysis = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsLoading(false);
+    setIsAnalyzingReport(false);
+    setStreamingStatus('');
+  };
+  const handleStopCurrentRequest = handleStopAnalysis;
+
+  const handleStopFollowUp = () => {
+    if (followUpAbortControllerRef.current) {
+      followUpAbortControllerRef.current.abort();
+      followUpAbortControllerRef.current = null;
+    }
+    setIsAskingFollowUp(false);
+    setFollowUpStreamText('');
+    setFollowUpStreamThought('');
   };
 
   const handleCreatePresentationBridge = () => {
@@ -1178,10 +1192,12 @@ function AiDiagnosisContent() {
                 </Card>
               )}
 
-              {/* Active Streaming Reasoning & Output Preview */}
-              {(isLoading || isAnalyzingReport || streamingText || streamingThought) && !isLoadingCase && (
+              {/* =========================================================================
+                  REPRESENTATIONS 1 & 2: COLLAPSIBLE AI THINKING & RAW STREAM CONSOLE
+                  ========================================================================= */}
+              {(isLoading || isAnalyzingReport || streamingText || streamingThought || thinkingProcess) && !isLoadingCase && (
                 <div className="space-y-4">
-                  {/* Status Banner when no results have parsed yet */}
+                  {/* Status Banner when diagnosing and no results have parsed yet */}
                   {(isLoading || isAnalyzingReport) && (!results || results.length === 0) && (
                     <Card className="border border-primary/20 bg-card p-6 shadow-xs flex flex-col items-center justify-center text-center space-y-3">
                       <Loader2 className="h-8 w-8 animate-spin text-primary" />
@@ -1209,7 +1225,7 @@ function AiDiagnosisContent() {
                     </div>
                   )}
 
-                  {/* Raw Text Streaming & Reasoning Box */}
+                  {/* The 2 Collapsible Representation Views: 1. AI Thinking Process, 2. Raw Streaming Model Output */}
                   <AiStreamingRawLogBox
                     isLoading={isLoading || isAnalyzingReport}
                     streamText={streamingText}
@@ -1218,16 +1234,17 @@ function AiDiagnosisContent() {
                     steps={['Clinical History & Multi-Modal Processing', 'Differential Hypothesis & Likelihood Ranking', 'Guideline Synthesis & Parameter Breakdown']}
                     activeStepIndex={progressStep}
                     onStop={handleStopAnalysis}
-                    title="Clinical AI Live Stream & Reasoning"
-                    defaultExpanded={true}
+                    title="1. AI Thinking & 2. Raw Stream Diagnostics"
+                    defaultExpanded={isLoading || isAnalyzingReport}
+                    defaultThinkingExpanded={true}
+                    defaultRawExpanded={isLoading || isAnalyzingReport}
                   />
                 </div>
               )}
 
-              {/* Completed Case Thinking Process (shown when feature flag enabled or available) */}
-              {!isLoading && !isAnalyzingReport && !streamingText && thinkingProcess && enableLiveThinking && (
-                <ClinicalThinkingBox thought={thinkingProcess} className="shadow-xs" />
-              )}
+              {/* =========================================================================
+                  REPRESENTATION 3: ACTUAL FORMATTED OUTPUT
+                  ========================================================================= */}
 
               {results && results.length > 0 && (
                 <div className="space-y-4 w-full max-w-full">

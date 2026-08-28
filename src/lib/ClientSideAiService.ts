@@ -8,9 +8,20 @@ import {
     extractProgressiveSlides,
     extractProgressiveClinicalAnswer,
     sanitizeContentItems,
+    stripThinkingTags,
+    sanitizeClinicalAnswerText,
 } from '@/lib/streaming-parser';
 
-export { parseAiJson, repairJsonString, extractProgressiveDiagnosis, extractProgressiveSlides, extractProgressiveClinicalAnswer, sanitizeContentItems };
+export {
+    parseAiJson,
+    repairJsonString,
+    extractProgressiveDiagnosis,
+    extractProgressiveSlides,
+    extractProgressiveClinicalAnswer,
+    sanitizeContentItems,
+    stripThinkingTags,
+    sanitizeClinicalAnswerText,
+};
 
 export const DEFAULT_GEMINI_MODEL = 'gemini-3.7-flash';
 export const DEFAULT_STT_MODEL = 'whisper-large-v3-turbo';
@@ -1157,17 +1168,21 @@ ${patientData ? `\nPatient Data & Clinical Notes:\n${patientData}` : ''}
             { signal: options?.signal }
         );
 
+        const { cleanText, thinking: inlineThinking } = stripThinkingTags(text || '');
+        const effectiveThinking = capturedThinking || inlineThinking || undefined;
+
         const fallback = {
             diagnoses: [
                 {
                     diagnosis: 'Provisional Clinical Differential',
                     confidenceLevel: 0.75,
-                    reasoning: text,
+                    lifeThreatCategory: 'Emergent' as const,
+                    reasoning: sanitizeClinicalAnswerText(cleanText) || 'Comprehensive clinical differential based on presentation.',
                     missingInformation: { information: [], tests: [] },
                 },
             ],
             clinicalAnswer: {
-                answer: text,
+                answer: sanitizeClinicalAnswerText(cleanText) || 'Clinical differential analysis and management synthesized.',
                 reasoning: 'Clinical reasoning generated.',
                 topic: 'Clinical Analysis',
             },
@@ -1181,17 +1196,36 @@ ${patientData ? `\nPatient Data & Clinical Notes:\n${patientData}` : ''}
             reportKnowledge: null as ReportKnowledgeData | null,
         };
 
-        const parsed = parseAiJson(text, fallback);
+        const parsed = parseAiJson(cleanText, fallback);
+
+        // Ensure clinical answer and diagnosis reasoning are strictly sanitized (no raw thinking tags or raw JSON)
+        const sanitizedDiagnoses = (parsed.diagnoses || fallback.diagnoses).map((d: any, idx: number) => ({
+            diagnosis: d.diagnosis || d.condition || `Differential #${idx + 1}`,
+            confidenceLevel: typeof d.confidenceLevel === 'number' ? d.confidenceLevel : 0.8,
+            lifeThreatCategory: d.lifeThreatCategory || 'Emergent',
+            reasoning: sanitizeClinicalAnswerText(d.reasoning || d.rationale || ''),
+            missingInformation: {
+                information: Array.isArray(d.missingInformation?.information) ? d.missingInformation.information : [],
+                tests: Array.isArray(d.missingInformation?.tests) ? d.missingInformation.tests : [],
+            },
+        }));
+
+        const sanitizedClinicalAnswer = {
+            answer: sanitizeClinicalAnswerText(parsed.clinicalAnswer?.answer || fallback.clinicalAnswer.answer),
+            reasoning: sanitizeClinicalAnswerText(parsed.clinicalAnswer?.reasoning || fallback.clinicalAnswer.reasoning),
+            topic: parsed.clinicalAnswer?.topic || fallback.clinicalAnswer.topic,
+            keyTakeaways: Array.isArray(parsed.clinicalAnswer?.keyTakeaways) ? parsed.clinicalAnswer.keyTakeaways : [],
+        };
 
         return {
-            diagnoses: parsed.diagnoses || fallback.diagnoses,
-            clinicalAnswer: parsed.clinicalAnswer || fallback.clinicalAnswer,
+            diagnoses: sanitizedDiagnoses,
+            clinicalAnswer: sanitizedClinicalAnswer,
             summary: parsed.summary || fallback.summary,
             proactiveQuestions: parsed.proactiveQuestions || fallback.proactiveQuestions,
             caseSummaryForPresentation:
                 parsed.caseSummaryForPresentation || parsed.summary || patientData || 'Case study details',
             reportKnowledge: parsed.reportKnowledge && parsed.reportKnowledge.categories && parsed.reportKnowledge.categories.length > 0 ? parsed.reportKnowledge : null,
-            thinkingProcess: capturedThinking || undefined,
+            thinkingProcess: effectiveThinking,
         };
     },
 

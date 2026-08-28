@@ -15,6 +15,7 @@ import {
   Square,
   Terminal,
   ArrowDownCircle,
+  Code2,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -34,6 +35,8 @@ export interface AiStreamingRawLogBoxProps {
   title?: string;
   onStop?: () => void;
   defaultExpanded?: boolean;
+  defaultThinkingExpanded?: boolean;
+  defaultRawExpanded?: boolean;
   className?: string;
   compact?: boolean;
 }
@@ -48,24 +51,34 @@ export function AiStreamingRawLogBox({
   steps = [],
   activeStepIndex = 0,
   modelName,
-  title = 'AI Live Stream & Diagnostics',
+  title = 'AI Diagnostics & Stream Console',
   onStop,
   defaultExpanded = true,
+  defaultThinkingExpanded = true,
+  defaultRawExpanded = true,
   className = '',
   compact = false,
 }: AiStreamingRawLogBoxProps) {
   const { activeModel, aiConfig } = useSettings();
   const effectiveLoading = isLoading !== undefined ? isLoading : (isStreaming !== undefined ? isStreaming : false);
-  const effectiveThinking = thinkingText || thought || '';
+  const effectiveThinking = (thinkingText || thought || '').trim();
 
   const effectiveModelName = modelName
     ? formatModelDisplayName(modelName)
     : formatModelDisplayName(activeModel || aiConfig?.customModel || aiConfig?.geminiModel || 'Gemini');
 
+  // Overall container expansion
   const [isExpanded, setIsExpanded] = useState(defaultExpanded);
+  // Independent collapsible sections
+  const [isThinkingOpen, setIsThinkingOpen] = useState(defaultThinkingExpanded);
+  const [isRawOpen, setIsRawOpen] = useState(defaultRawExpanded);
+
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [copied, setCopied] = useState(false);
-  const [autoScroll, setAutoScroll] = useState(true);
+  const [copiedThinking, setCopiedThinking] = useState(false);
+  const [copiedRaw, setCopiedRaw] = useState(false);
+  const [copiedAll, setCopiedAll] = useState(false);
+  const [autoScrollRaw, setAutoScrollRaw] = useState(true);
+  const [autoScrollThinking, setAutoScrollThinking] = useState(true);
 
   const streamScrollRef = useRef<HTMLDivElement>(null);
   const thinkingScrollRef = useRef<HTMLDivElement>(null);
@@ -86,41 +99,62 @@ export function AiStreamingRawLogBox({
 
   // Auto-scroll when new text arrives
   useEffect(() => {
-    if (autoScroll && streamScrollRef.current && isExpanded) {
+    if (autoScrollRaw && streamScrollRef.current && isExpanded && isRawOpen) {
       streamScrollRef.current.scrollTop = streamScrollRef.current.scrollHeight;
     }
-  }, [streamText, autoScroll, isExpanded]);
+  }, [streamText, autoScrollRaw, isExpanded, isRawOpen]);
 
   useEffect(() => {
-    if (autoScroll && thinkingScrollRef.current && isExpanded) {
+    if (autoScrollThinking && thinkingScrollRef.current && isExpanded && isThinkingOpen) {
       thinkingScrollRef.current.scrollTop = thinkingScrollRef.current.scrollHeight;
     }
-  }, [effectiveThinking, autoScroll, isExpanded]);
+  }, [effectiveThinking, autoScrollThinking, isExpanded, isThinkingOpen]);
 
   // Automatically expand when generation starts
   useEffect(() => {
     if (effectiveLoading) {
       setIsExpanded(true);
+      if (effectiveThinking) setIsThinkingOpen(true);
+      if (streamText) setIsRawOpen(true);
     }
-  }, [effectiveLoading]);
+  }, [effectiveLoading, effectiveThinking, streamText]);
 
   // If not loading and no content received yet, do not render
   if (!effectiveLoading && !effectiveThinking && !streamText) {
     return null;
   }
 
-  const handleCopy = () => {
+  const handleCopyThinking = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (effectiveThinking) {
+      navigator.clipboard.writeText(effectiveThinking);
+      setCopiedThinking(true);
+      setTimeout(() => setCopiedThinking(false), 2000);
+    }
+  };
+
+  const handleCopyRaw = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (streamText) {
+      navigator.clipboard.writeText(streamText);
+      setCopiedRaw(true);
+      setTimeout(() => setCopiedRaw(false), 2000);
+    }
+  };
+
+  const handleCopyAll = (e: React.MouseEvent) => {
+    e.stopPropagation();
     const fullContent = [
-      effectiveThinking ? `--- THINKING PROCESS ---\n${effectiveThinking}` : '',
-      streamText ? `--- RAW OUTPUT ---\n${streamText}` : '',
+      effectiveThinking ? `=== 1. AI THINKING & REASONING ===\n${effectiveThinking}` : '',
+      streamText ? `=== 2. RAW STREAM OUTPUT ===\n${streamText}` : '',
     ]
       .filter(Boolean)
       .join('\n\n');
 
     if (fullContent) {
       navigator.clipboard.writeText(fullContent);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      setCopiedAll(true);
+      setTimeout(() => setCopiedAll(false), 2000);
     }
   };
 
@@ -132,15 +166,17 @@ export function AiStreamingRawLogBox({
 
   const charCount = streamText.length;
   const estimatedTokens = Math.round(charCount / 4);
+  const thinkingCharCount = effectiveThinking.length;
+  const estimatedThinkingTokens = Math.round(thinkingCharCount / 4);
 
   return (
     <div
       id="ai-streaming-raw-log-box"
-      className={`rounded-2xl border border-primary/25 bg-card shadow-md overflow-hidden transition-all duration-300 ${
+      className={`rounded-2xl border border-primary/20 bg-card shadow-sm overflow-hidden transition-all duration-300 ${
         effectiveLoading ? 'ring-1 ring-primary/30 shadow-primary/5' : ''
       } ${className}`}
     >
-      {/* Header Bar */}
+      {/* Primary Top Header Bar */}
       <div className="flex items-center justify-between px-3.5 py-2.5 bg-muted/40 border-b border-border/60">
         <div className="flex items-center gap-2.5 min-w-0">
           <div
@@ -167,14 +203,14 @@ export function AiStreamingRawLogBox({
                 {effectiveModelName}
               </Badge>
               {effectiveLoading ? (
-                <span className="inline-flex items-center gap-1 text-[10px] text-amber-600 dark:text-amber-400 font-medium animate-pulse">
+                <span className="inline-flex items-center gap-1 text-[10px] text-amber-600 dark:text-amber-400 font-semibold animate-pulse">
                   <Activity className="h-3 w-3" />
                   Streaming Live...
                 </span>
               ) : (
                 <span className="inline-flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400 font-medium">
                   <CheckCircle2 className="h-3 w-3" />
-                  Completed
+                  Execution Complete
                 </span>
               )}
             </div>
@@ -190,22 +226,26 @@ export function AiStreamingRawLogBox({
             </span>
           )}
 
-          {charCount > 0 && (
-            <span className="text-[10px] font-mono text-muted-foreground hidden sm:inline-flex bg-background px-1.5 py-0.5 rounded border border-border/60">
-              {charCount} chars (~{estimatedTokens} tok)
-            </span>
-          )}
-
           {(streamText || effectiveThinking) && (
             <Button
               type="button"
               variant="ghost"
               size="sm"
-              onClick={handleCopy}
-              className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
-              title="Copy Raw Stream & Reasoning"
+              onClick={handleCopyAll}
+              className="h-7 px-2 text-[11px] font-medium gap-1 text-muted-foreground hover:text-foreground hidden sm:inline-flex"
+              title="Copy All Stream & Reasoning Logs"
             >
-              {copied ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+              {copiedAll ? (
+                <>
+                  <Check className="h-3.5 w-3.5 text-emerald-500" />
+                  <span className="text-emerald-600 dark:text-emerald-400">Copied</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="h-3.5 w-3.5" />
+                  <span>Copy Logs</span>
+                </>
+              )}
             </Button>
           )}
 
@@ -215,7 +255,7 @@ export function AiStreamingRawLogBox({
               variant="destructive"
               size="sm"
               onClick={onStop}
-              className="h-7 px-2 text-[11px] font-semibold gap-1 shrink-0"
+              className="h-7 px-2.5 text-[11px] font-semibold gap-1 shrink-0"
               title="Stop AI Generation"
             >
               <Square className="h-3 w-3 fill-current" />
@@ -229,7 +269,7 @@ export function AiStreamingRawLogBox({
             size="sm"
             onClick={() => setIsExpanded(!isExpanded)}
             className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
-            title={isExpanded ? 'Collapse Raw Stream' : 'Expand Raw Stream'}
+            title={isExpanded ? 'Collapse Stream Console' : 'Expand Stream Console'}
           >
             {isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
           </Button>
@@ -238,7 +278,7 @@ export function AiStreamingRawLogBox({
 
       {/* Expandable Body */}
       {isExpanded && (
-        <div className="p-3.5 space-y-3 text-xs bg-background/60">
+        <div className="p-3.5 space-y-3.5 text-xs bg-background/60">
           {/* Step Progress Checklist if steps provided */}
           {steps.length > 0 && (
             <div className="space-y-1.5 pb-2 border-b border-border/40">
@@ -275,7 +315,7 @@ export function AiStreamingRawLogBox({
             </div>
           )}
 
-          {/* Current Active Status */}
+          {/* Current Active Status Pill */}
           {effectiveLoading && currentStep && (
             <div className="flex items-center gap-2 text-xs font-medium text-foreground bg-primary/5 p-2.5 rounded-xl border border-primary/15">
               <Sparkles className="h-4 w-4 text-primary shrink-0 animate-spin" />
@@ -283,69 +323,195 @@ export function AiStreamingRawLogBox({
             </div>
           )}
 
-          {/* Model Thinking / Chain of Thought */}
-          {effectiveThinking && (
-            <div className="space-y-1">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
-                  <Brain className="h-3.5 w-3.5 text-primary" />
-                  Model Thinking &amp; Reasoning Process
-                </span>
-                <Badge variant="secondary" className="text-[9px] px-1 font-mono">
-                  Chain of Thought
-                </Badge>
-              </div>
+          {/* =========================================================
+              REPRESENTATION 1: AI THINKING & REASONING (COLLAPSIBLE)
+              ========================================================= */}
+          {(effectiveThinking || (effectiveLoading && !streamText)) && (
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 dark:bg-amber-950/20 overflow-hidden transition-all">
+              {/* Header / Toggle */}
               <div
-                ref={thinkingScrollRef}
-                className="p-2.5 rounded-xl bg-amber-500/5 dark:bg-amber-500/10 border border-amber-500/20 text-foreground/80 text-[11px] leading-relaxed max-h-36 overflow-y-auto font-mono whitespace-pre-wrap select-text"
+                onClick={() => setIsThinkingOpen(!isThinkingOpen)}
+                className="flex items-center justify-between px-3 py-2 bg-amber-500/10 dark:bg-amber-900/30 cursor-pointer hover:bg-amber-500/15 select-none transition-colors"
               >
-                {effectiveThinking}
+                <div className="flex items-center gap-2 min-w-0">
+                  <Brain className="h-4 w-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                  <span className="text-xs font-bold text-amber-900 dark:text-amber-200 truncate">
+                    1. AI Thinking &amp; Reasoning Process
+                  </span>
+                  <Badge
+                    variant="outline"
+                    className="text-[9px] px-1.5 py-0 border-amber-500/40 text-amber-700 dark:text-amber-300 font-mono hidden sm:inline-flex"
+                  >
+                    {effectiveLoading && !streamText ? 'Thinking in real-time...' : 'Chain of Thought'}
+                  </Badge>
+                </div>
+
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {thinkingCharCount > 0 && (
+                    <span className="text-[10px] font-mono text-amber-700/80 dark:text-amber-300/80">
+                      {thinkingCharCount} chars (~{estimatedThinkingTokens} tok)
+                    </span>
+                  )}
+                  {effectiveThinking && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={handleCopyThinking}
+                      className="h-6 w-6 p-0 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20"
+                      title="Copy Thinking Chain"
+                    >
+                      {copiedThinking ? (
+                        <Check className="h-3.5 w-3.5 text-emerald-500" />
+                      ) : (
+                        <Copy className="h-3.5 w-3.5" />
+                      )}
+                    </Button>
+                  )}
+                  <button
+                    type="button"
+                    className="p-0.5 text-amber-700 dark:text-amber-300"
+                    aria-label={isThinkingOpen ? 'Collapse Thinking' : 'Expand Thinking'}
+                  >
+                    {isThinkingOpen ? (
+                      <ChevronUp className="h-4 w-4" />
+                    ) : (
+                      <ChevronDown className="h-4 w-4" />
+                    )}
+                  </button>
+                </div>
               </div>
+
+              {/* Collapsible Content */}
+              {isThinkingOpen && (
+                <div className="p-3 space-y-2">
+                  <div className="flex items-center justify-between text-[10px] text-amber-800/80 dark:text-amber-300/80">
+                    <span>Internal clinical deliberation, differential weighting &amp; guidelines check:</span>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setAutoScrollThinking(!autoScrollThinking);
+                      }}
+                      className={`text-[9px] px-1.5 py-0.5 rounded border transition-colors flex items-center gap-1 ${
+                        autoScrollThinking
+                          ? 'bg-amber-500/20 border-amber-500/40 text-amber-900 dark:text-amber-200'
+                          : 'bg-background/50 border-border text-muted-foreground'
+                      }`}
+                    >
+                      <ArrowDownCircle className="h-2.5 w-2.5" />
+                      Auto-scroll: {autoScrollThinking ? 'ON' : 'OFF'}
+                    </button>
+                  </div>
+                  <div
+                    ref={thinkingScrollRef}
+                    className="p-3 rounded-lg bg-background/90 border border-amber-500/20 text-foreground text-[11px] leading-relaxed max-h-44 overflow-y-auto font-mono whitespace-pre-wrap select-text"
+                  >
+                    {effectiveThinking || (
+                      <span className="text-amber-700/60 dark:text-amber-400/60 italic flex items-center gap-2">
+                        <Brain className="h-3.5 w-3.5 animate-pulse" />
+                        Generating internal clinical reasoning chain...
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
-          {/* Raw Text Stream Box */}
-          <div className="space-y-1">
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
-                <FileText className="h-3.5 w-3.5 text-blue-500" />
-                Raw Text Streaming Output (Live)
-              </span>
-              <div className="flex items-center gap-2">
+          {/* =========================================================
+              REPRESENTATION 2: RAW STREAMING OUTPUT (COLLAPSIBLE)
+              ========================================================= */}
+          <div className="rounded-xl border border-neutral-800 bg-neutral-950 overflow-hidden transition-all shadow-xs">
+            {/* Header / Toggle */}
+            <div
+              onClick={() => setIsRawOpen(!isRawOpen)}
+              className="flex items-center justify-between px-3 py-2 bg-neutral-900 cursor-pointer hover:bg-neutral-800/80 select-none transition-colors border-b border-neutral-800"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <Code2 className="h-4 w-4 text-emerald-400 shrink-0" />
+                <span className="text-xs font-bold text-neutral-200 truncate">
+                  2. Raw Streaming Model Output
+                </span>
+                <Badge
+                  variant="outline"
+                  className="text-[9px] px-1.5 py-0 border-neutral-700 text-neutral-400 font-mono hidden sm:inline-flex"
+                >
+                  {effectiveLoading ? 'Streaming' : 'Raw Tokens'}
+                </Badge>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
                 <button
                   type="button"
-                  onClick={() => setAutoScroll(!autoScroll)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setAutoScrollRaw(!autoScrollRaw);
+                  }}
                   className={`text-[9px] px-1.5 py-0.5 rounded border transition-colors flex items-center gap-1 ${
-                    autoScroll
-                      ? 'bg-primary/10 border-primary/30 text-primary'
-                      : 'bg-muted border-border text-muted-foreground'
+                    autoScrollRaw
+                      ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-400'
+                      : 'bg-neutral-800 border-neutral-700 text-neutral-400'
                   }`}
-                  title="Toggle auto-scroll to latest tokens"
+                  title="Toggle auto-scroll to newest stream token"
                 >
                   <ArrowDownCircle className="h-2.5 w-2.5" />
-                  Auto-scroll: {autoScroll ? 'ON' : 'OFF'}
+                  Auto-scroll: {autoScrollRaw ? 'ON' : 'OFF'}
                 </button>
-                <span className="text-[10px] text-muted-foreground font-mono">
-                  {charCount} chars
-                </span>
+
+                {charCount > 0 && (
+                  <span className="text-[10px] text-neutral-400 font-mono hidden xs:inline-block">
+                    {charCount} chars (~{estimatedTokens} tok)
+                  </span>
+                )}
+
+                {streamText && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleCopyRaw}
+                    className="h-6 w-6 p-0 text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800"
+                    title="Copy Raw Output"
+                  >
+                    {copiedRaw ? (
+                      <Check className="h-3.5 w-3.5 text-emerald-400" />
+                    ) : (
+                      <Copy className="h-3.5 w-3.5" />
+                    )}
+                  </Button>
+                )}
+
+                <button
+                  type="button"
+                  className="p-0.5 text-neutral-400 hover:text-neutral-200"
+                  aria-label={isRawOpen ? 'Collapse Raw Stream' : 'Expand Raw Stream'}
+                >
+                  {isRawOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                </button>
               </div>
             </div>
 
-            <div
-              ref={streamScrollRef}
-              className={`p-3 rounded-xl bg-neutral-950 text-neutral-100 border border-neutral-800 text-[11px] leading-relaxed font-mono whitespace-pre-wrap select-text overflow-y-auto ${
-                compact ? 'max-h-44' : 'max-h-60'
-              }`}
-            >
-              {streamText || (
-                <span className="text-neutral-500 italic">
-                  {effectiveLoading ? 'Waiting for first stream token from model...' : 'No stream output recorded.'}
-                </span>
-              )}
-              {effectiveLoading && (
-                <span className="inline-block w-2 h-3.5 bg-emerald-400 ml-1 animate-pulse align-middle" />
-              )}
-            </div>
+            {/* Collapsible Raw Terminal Content */}
+            {isRawOpen && (
+              <div
+                ref={streamScrollRef}
+                className={`p-3 text-neutral-200 text-[11px] leading-relaxed font-mono whitespace-pre-wrap select-text overflow-y-auto ${
+                  compact ? 'max-h-44' : 'max-h-64'
+                }`}
+              >
+                {streamText || (
+                  <span className="text-neutral-500 italic">
+                    {effectiveLoading
+                      ? 'Waiting for first stream tokens from model...'
+                      : 'No raw stream content recorded.'}
+                  </span>
+                )}
+                {effectiveLoading && (
+                  <span className="inline-block w-2 h-3.5 bg-emerald-400 ml-1 animate-pulse align-middle" />
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -354,3 +520,4 @@ export function AiStreamingRawLogBox({
 }
 
 export default AiStreamingRawLogBox;
+

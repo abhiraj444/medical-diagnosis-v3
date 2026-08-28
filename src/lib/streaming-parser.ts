@@ -1,6 +1,75 @@
 import type { DiagnosisItem, ClinicalAnswerData, Slide, ReportKnowledgeData, ContentItem } from '@/types';
 
 /**
+ * Strips model thinking/reasoning tags (<think>, <thought>, <reasoning>) from text,
+ * separating the internal thinking chain from the user-facing output.
+ */
+export function stripThinkingTags(raw: string): { cleanText: string; thinking: string } {
+  if (!raw || typeof raw !== 'string') return { cleanText: '', thinking: '' };
+
+  let thinking = '';
+  let cleanText = raw;
+
+  // 1. Extract and remove closed thinking blocks
+  const thinkRegex = /<(?:think|thought|reasoning)>([\s\S]*?)<\/(?:think|thought|reasoning)>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = thinkRegex.exec(raw)) !== null) {
+    if (match[1]) {
+      thinking += (thinking ? '\n\n' : '') + match[1].trim();
+    }
+  }
+  cleanText = cleanText.replace(thinkRegex, '').trim();
+
+  // 2. Handle unclosed opening tag at the start of a stream (still thinking)
+  const unclosedMatch = cleanText.match(/^<(?:think|thought|reasoning)>([\s\S]*)$/i);
+  if (unclosedMatch) {
+    thinking += (thinking ? '\n\n' : '') + unclosedMatch[1].trim();
+    cleanText = '';
+  }
+
+  // 3. Remove any remaining stray tag remnants
+  cleanText = cleanText.replace(/<\/?(?:think|thought|reasoning)>/gi, '').trim();
+
+  return { cleanText, thinking };
+}
+
+/**
+ * Sanitizes clinical answer markdown text so raw JSON or thinking leftovers never render
+ * in the final user-facing clinical synthesis container.
+ */
+export function sanitizeClinicalAnswerText(text: string): string {
+  if (!text || typeof text !== 'string') return '';
+  
+  const { cleanText } = stripThinkingTags(text);
+  let cleaned = cleanText.trim();
+
+  // If text starts with a JSON object or array, try extracting the answer property
+  if (cleaned.startsWith('{') || cleaned.startsWith('```json') || cleaned.startsWith('```\n{')) {
+    try {
+      const parsed = parseAiJson<any>(cleaned, null);
+      if (parsed && typeof parsed === 'object') {
+        if (typeof parsed.answer === 'string' && parsed.answer.trim()) {
+          return parsed.answer.trim();
+        }
+        if (typeof parsed.clinicalAnswer === 'object' && typeof parsed.clinicalAnswer.answer === 'string') {
+          return parsed.clinicalAnswer.answer.trim();
+        }
+        if (typeof parsed.summary === 'string' && parsed.summary.trim()) {
+          return parsed.summary.trim();
+        }
+      }
+    } catch {}
+  }
+
+  // Strip markdown code fences if wrapped entirely around the answer
+  if (cleaned.startsWith('```') && cleaned.endsWith('```')) {
+    cleaned = cleaned.replace(/^```(?:markdown|text|json)?\s*/i, '').replace(/```\s*$/, '').trim();
+  }
+
+  return cleaned;
+}
+
+/**
  * Unescapes JSON string escape sequences (\n, \t, \", \\) safely
  */
 function unescapeJsonStr(str: string): string {
@@ -19,6 +88,11 @@ function unescapeJsonStr(str: string): string {
  */
 export function repairJsonString(jsonStr: string): string {
   let text = (jsonStr || '').trim();
+  if (!text) return '{}';
+
+  // Strip thinking tags first
+  const { cleanText } = stripThinkingTags(text);
+  text = cleanText;
   if (!text) return '{}';
 
   // 1. Remove markdown code fences if present
@@ -101,7 +175,8 @@ export function repairJsonString(jsonStr: string): string {
 export function parseAiJson<T>(rawText: string, fallback: T): T {
   if (!rawText || typeof rawText !== 'string') return fallback;
 
-  let cleaned = rawText.trim();
+  const { cleanText } = stripThinkingTags(rawText);
+  let cleaned = cleanText.trim();
 
   // Strip markdown code fence if wrapping the entire string
   if (cleaned.startsWith('```')) {
@@ -228,6 +303,7 @@ export function extractProgressiveDiagnosis(rawText: string): {
   proactiveQuestions: string[];
   reportKnowledge?: ReportKnowledgeData | null;
   caseSummaryForPresentation?: string;
+  thinking?: string;
 } {
   const result: {
     summary?: string;
@@ -236,6 +312,7 @@ export function extractProgressiveDiagnosis(rawText: string): {
     proactiveQuestions: string[];
     reportKnowledge?: ReportKnowledgeData | null;
     caseSummaryForPresentation?: string;
+    thinking?: string;
   } = {
     diagnoses: [],
     proactiveQuestions: [],
@@ -243,9 +320,16 @@ export function extractProgressiveDiagnosis(rawText: string): {
 
   if (!rawText || rawText.trim().length === 0) return result;
 
+  const { cleanText, thinking } = stripThinkingTags(rawText);
+  if (thinking) {
+    result.thinking = thinking;
+  }
+
+  if (!cleanText || cleanText.trim().length === 0) return result;
+
   // Try parsing partial or full JSON with repair
   try {
-    const parsed = parseAiJson<any>(rawText, null);
+    const parsed = parseAiJson<any>(cleanText, null);
     if (parsed && typeof parsed === 'object') {
       if (typeof parsed.summary === 'string' && parsed.summary.trim()) {
         result.summary = parsed.summary.trim();
@@ -261,7 +345,7 @@ export function extractProgressiveDiagnosis(rawText: string): {
             diagnosis: d.diagnosis || d.condition || d.name || `Differential #${idx + 1}`,
             confidenceLevel: typeof d.confidenceLevel === 'number' ? d.confidenceLevel : 0.8,
             lifeThreatCategory: d.lifeThreatCategory || 'Emergent',
-            reasoning: d.reasoning || d.rationale || '',
+            reasoning: sanitizeClinicalAnswerText(d.reasoning || d.rationale || ''),
             missingInformation: {
               information: Array.isArray(d.missingInformation?.information) ? d.missingInformation.information : [],
               tests: Array.isArray(d.missingInformation?.tests) ? d.missingInformation.tests : [],
@@ -271,8 +355,8 @@ export function extractProgressiveDiagnosis(rawText: string): {
 
       if (parsed.clinicalAnswer && typeof parsed.clinicalAnswer === 'object') {
         result.clinicalAnswer = {
-          answer: parsed.clinicalAnswer.answer || '',
-          reasoning: parsed.clinicalAnswer.reasoning || '',
+          answer: sanitizeClinicalAnswerText(parsed.clinicalAnswer.answer || ''),
+          reasoning: sanitizeClinicalAnswerText(parsed.clinicalAnswer.reasoning || ''),
           topic: parsed.clinicalAnswer.topic || '',
           keyTakeaways: Array.isArray(parsed.clinicalAnswer.keyTakeaways) ? parsed.clinicalAnswer.keyTakeaways : [],
         };
@@ -292,27 +376,27 @@ export function extractProgressiveDiagnosis(rawText: string): {
 
   // Regex fallback for progressive partial extraction if JSON parse returned empty or partial
   if (!result.summary) {
-    const sumMatch = rawText.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)/i);
+    const sumMatch = cleanText.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)/i);
     if (sumMatch && sumMatch[1]) {
       result.summary = unescapeJsonStr(sumMatch[1]).trim();
     }
   }
 
   if (!result.caseSummaryForPresentation) {
-    const caseSumMatch = rawText.match(/"caseSummaryForPresentation"\s*:\s*"((?:[^"\\]|\\.)*)/i);
+    const caseSumMatch = cleanText.match(/"caseSummaryForPresentation"\s*:\s*"((?:[^"\\]|\\.)*)/i);
     if (caseSumMatch && caseSumMatch[1]) {
       result.caseSummaryForPresentation = unescapeJsonStr(caseSumMatch[1]).trim();
     }
   }
 
   if (!result.clinicalAnswer || !result.clinicalAnswer.answer) {
-    const ansMatch = rawText.match(/"answer"\s*:\s*"((?:[^"\\]|\\.)*)/i);
+    const ansMatch = cleanText.match(/"answer"\s*:\s*"((?:[^"\\]|\\.)*)/i);
     if (ansMatch && ansMatch[1]) {
       const liveAnswer = unescapeJsonStr(ansMatch[1]);
       if (liveAnswer.trim()) {
         result.clinicalAnswer = {
           ...result.clinicalAnswer,
-          answer: liveAnswer,
+          answer: sanitizeClinicalAnswerText(liveAnswer),
           topic: result.clinicalAnswer?.topic || 'Clinical Differential Analysis',
           reasoning: result.clinicalAnswer?.reasoning || 'Live guideline-directed clinical evaluation',
           keyTakeaways: result.clinicalAnswer?.keyTakeaways || [],
@@ -325,7 +409,7 @@ export function extractProgressiveDiagnosis(rawText: string): {
     // Scan for diagnoses objects inside the string
     const diagRegex = /"diagnosis"\s*:\s*"((?:[^"\\]|\\.)*)"[\s\S]*?(?:"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)"|(?:"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)))?/gi;
     let match: RegExpExecArray | null;
-    while ((match = diagRegex.exec(rawText)) !== null) {
+    while ((match = diagRegex.exec(cleanText)) !== null) {
       if (match[1] && match[1].trim().length > 1) {
         const diagName = unescapeJsonStr(match[1]).trim();
         const reason = unescapeJsonStr(match[2] || match[3] || '').trim();
@@ -333,7 +417,7 @@ export function extractProgressiveDiagnosis(rawText: string): {
           diagnosis: diagName,
           confidenceLevel: 0.85,
           lifeThreatCategory: 'Emergent',
-          reasoning: reason,
+          reasoning: sanitizeClinicalAnswerText(reason),
           missingInformation: { information: [], tests: [] },
         });
       }
